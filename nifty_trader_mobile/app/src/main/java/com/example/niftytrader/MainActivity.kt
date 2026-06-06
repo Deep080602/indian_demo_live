@@ -1099,11 +1099,6 @@ fun NiftyTraderApp() {
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // 6. SYSTEM TERMINAL LOGS
-                LiveLogConsoleCard(logs = tradingData.log)
-
                 Spacer(modifier = Modifier.height(40.dp))
             }
 
