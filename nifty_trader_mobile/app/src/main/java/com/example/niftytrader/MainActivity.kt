@@ -136,7 +136,7 @@ data class TradingData(
     val stats: Stats = Stats(),
     val running: Boolean = false,
     val liveTrading: Boolean = false,
-    val activeBroker: String = "DHAN",
+    val activeBroker: String = "GROWW",
     val smartFilterEnabled: Boolean = false,
     val trailingSlEnabled: Boolean = false,
     val dhanClientId: String = "",
@@ -201,7 +201,7 @@ fun NiftyTraderApp() {
 
     // Live Broker Authentication State
     var showAuthDialog by remember { mutableStateOf(false) }
-    var authBroker by remember { mutableStateOf("DHAN") }
+    var authBroker by remember { mutableStateOf("GROWW") }
     var authClientId by remember { mutableStateOf("") }
     var authAccessToken by remember { mutableStateOf("") }
     var authReuseSavedToken by remember { mutableStateOf(false) }
@@ -623,55 +623,6 @@ fun NiftyTraderApp() {
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 var isSubmittingBroker by remember { mutableStateOf(false) }
-                                // Dhan Button
-                                Button(
-                                    onClick = {
-                                        if (!isSubmittingBroker && tradingData.activeBroker != "DHAN") {
-                                            if (tradingData.liveTrading) {
-                                                authBroker = "DHAN"
-                                                authClientId = tradingData.dhanClientId
-                                                authAccessToken = ""
-                                                authReuseSavedToken = tradingData.dhanHasToken
-                                                authErrorMessage = null
-                                                onAuthSuccessAction = {
-                                                    coroutineScope.launch {
-                                                        setActiveBroker(baseUrl, "DHAN")
-                                                        delay(500)
-                                                        try {
-                                                            tradingData = fetchDashboardData(baseUrl)
-                                                        } catch (e: Exception) {}
-                                                    }
-                                                }
-                                                showAuthDialog = true
-                                            } else {
-                                                isSubmittingBroker = true
-                                                coroutineScope.launch {
-                                                    setActiveBroker(baseUrl, "DHAN")
-                                                    delay(500)
-                                                    try {
-                                                        tradingData = fetchDashboardData(baseUrl)
-                                                    } catch (e: Exception) {}
-                                                    isSubmittingBroker = false
-                                                }
-                                            }
-                                        }
-                                    },
-                                    modifier = Modifier.weight(1f).height(32.dp),
-                                    contentPadding = PaddingValues(0.dp),
-                                    shape = RoundedCornerShape(6.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = if (tradingData.activeBroker == "DHAN") ColorGreen.copy(alpha = 0.15f) else Color.Transparent
-                                    ),
-                                    border = BorderStroke(1.dp, if (tradingData.activeBroker == "DHAN") ColorGreen else ColorBorder)
-                                ) {
-                                    Text(
-                                        text = "🏹 DHAN BROKER",
-                                        color = if (tradingData.activeBroker == "DHAN") ColorGreen else ColorMuted,
-                                        fontSize = 9.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                }
 
                                 // Groww Button
                                 Button(
@@ -706,7 +657,7 @@ fun NiftyTraderApp() {
                                             }
                                         }
                                     },
-                                    modifier = Modifier.weight(1f).height(32.dp),
+                                    modifier = Modifier.fillMaxWidth().height(32.dp),
                                     contentPadding = PaddingValues(0.dp),
                                     shape = RoundedCornerShape(6.dp),
                                     colors = ButtonDefaults.buttonColors(
