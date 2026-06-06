@@ -1,0 +1,16 @@
+# render.yaml — Render Blueprint Specification
+# Deploy this by going to Render dashboard -> Blueprints -> New Blueprint
+services:
+  - type: web
+    name: dhan-options-trader
+    env: docker
+    plan: free                 # Using Render's 100% Free Plan
+
+    # Secure environment variables mapped at runtime
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: DHAN_CLIENT_ID
+        sync: false            # Set securely inside the Render Web Console UI
+      - key: DHAN_ACCESS_TOKEN
+        sync: false            # Set securely inside the Render Web Console UI

@@ -1,0 +1,42 @@
+# Python virtual environments
+venv/
+.venv/
+env/
+ENV/
+lib/
+lib64/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Local trade logs and capital records (never commit this to preserve state)
+logs/
+*.log
+*.csv
+capital.json
+excel_logger.xlsx
+*.xlsx
+groww_screenshot.png
+groww_page.html
+nse_page.html
+tv_page.html
+test_screenshot.png
+
+# IDE / Editor settings
+.vscode/
+.idea/
+.codex/
+.DS_Store
+Thumbs.db
+
+# Sensitive credentials and environment variables
+.env
+
+# Backups and temporary files
+.git_backup/
+=
+*.apk

@@ -1,0 +1,29 @@
+# requirements.txt — Dhan Options Paper Trader
+# Install: pip install -r requirements.txt
+
+# Core
+dhanhq>=2.0.0           # Dhan HQ official Python SDK
+pandas>=2.0.0
+numpy>=1.24.0
+python-dateutil>=2.8.2
+
+# Additional Dependencies
+flask>=3.0.0
+selenium>=4.15.0
+yfinance>=0.2.33
+scikit-learn>=1.2.0
+webdriver-manager>=4.0.1
+
+# Optional but recommended
+pytz>=2023.3            # Timezone handling
+requests>=2.31.0        # Used internally by dhanhq
+websocket-client>=1.6.0 # For Dhan live feed (if needed later)
+
+# Monitoring / Alerting (optional)
+# python-telegram-bot>=20.0   # Telegram trade alerts
+# slack-sdk>=3.0.0             # Slack alerts
+
+# Production Web Servers
+gunicorn>=21.2.0              # Linux production WSGI server
+waitress>=3.0.0              # Windows production WSGI server
+
