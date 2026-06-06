@@ -275,6 +275,26 @@ HTML_TEMPLATE = """
             backdrop-filter: blur(10px);
         }
 
+        .chart-box {
+            overflow-x: auto;
+            overflow-y: hidden;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(157,78,221,0.4) transparent;
+        }
+        .chart-box::-webkit-scrollbar {
+            height: 6px;
+        }
+        .chart-box::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .chart-box::-webkit-scrollbar-thumb {
+            background: rgba(157,78,221,0.4);
+            border-radius: 10px;
+        }
+        .chart-box::-webkit-scrollbar-thumb:hover {
+            background: rgba(157,78,221,0.8);
+        }
+
         .chart-title {
             margin-bottom: 20px;
             font-size: 1.5em;
@@ -441,11 +461,15 @@ HTML_TEMPLATE = """
                     <button id="btnDrawdownWeb" class="chart-tab" onclick="switchWebChart('drawdown')">📉 Drawdown</button>
                 </div>
             </div>
-            <div style="position:relative;" id="equityWebChartContainer">
-                <canvas id="pnl-chart"></canvas>
+            <div class="chart-box" style="position:relative;" id="equityWebChartContainer">
+                <div id="pnlWrapper" style="width:100%;height:300px;position:relative;">
+                    <canvas id="pnl-chart"></canvas>
+                </div>
             </div>
-            <div style="position:relative;display:none;" id="drawdownWebChartContainer">
-                <canvas id="ddChart"></canvas>
+            <div class="chart-box" style="position:relative;display:none;" id="drawdownWebChartContainer">
+                <div id="ddWrapper" style="width:100%;height:300px;position:relative;">
+                    <canvas id="ddChart"></canvas>
+                </div>
             </div>
         </div>
 
@@ -476,11 +500,13 @@ HTML_TEMPLATE = """
                 btnDd.classList.remove('active');
                 boxEq.style.display = 'block';
                 boxDd.style.display = 'none';
+                setTimeout(() => { if (boxEq) boxEq.scrollLeft = 999999; }, 50);
             } else {
                 btnDd.classList.add('active');
                 btnEq.classList.remove('active');
                 boxDd.style.display = 'block';
                 boxEq.style.display = 'none';
+                setTimeout(() => { if (boxDd) boxDd.scrollLeft = 999999; }, 50);
             }
         }
 
@@ -614,6 +640,22 @@ HTML_TEMPLATE = """
                 cumulative += parseFloat(trade.PnL_Rs || 0);
                 pnlData.push(cumulative);
             });
+
+            // Dynamic width calculation to show at least 10 trades before scrolling horizontally
+            const N = trades.length;
+            const scrollWidth = N > 10 ? `${N * 55}px` : '100%';
+            const pnlWrap = document.getElementById('pnlWrapper');
+            const ddWrap = document.getElementById('ddWrapper');
+            if (pnlWrap) pnlWrap.style.width = scrollWidth;
+            if (ddWrap) ddWrap.style.width = scrollWidth;
+
+            // Auto-scroll to show the latest trades first
+            setTimeout(() => {
+                const boxEq = document.getElementById('equityWebChartContainer');
+                const boxDd = document.getElementById('drawdownWebChartContainer');
+                if (boxEq) boxEq.scrollLeft = 999999;
+                if (boxDd) boxDd.scrollLeft = 999999;
+            }, 150);
 
             const labels = trades.map((t, i) => `Trade ${i + 1}`);
 

@@ -3475,7 +3475,11 @@ body::before {
 
 .mc-sub{font-size:11px;color:var(--muted);margin-top:5px;font-weight:600;}
 .charts{display:grid;grid-template-columns:1.4fr 1fr;gap:16px;margin-bottom:20px}
-.chart-box{height:300px;position:relative;width:100%}
+.chart-box{height:300px;position:relative;width:100%;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;scrollbar-color:var(--accent) transparent}
+.chart-box::-webkit-scrollbar{height:6px}
+.chart-box::-webkit-scrollbar-track{background:transparent}
+.chart-box::-webkit-scrollbar-thumb{background:rgba(157,78,221,0.4);border-radius:10px}
+.chart-box::-webkit-scrollbar-thumb:hover{background:rgba(157,78,221,0.8)}
 
 .eq-glow{position:absolute;inset:0;border-radius:10px;pointer-events:none;background:radial-gradient(ellipse at 50% 110%,rgba(0,255,136,.18) 0%,transparent 70%);animation:glowPulse 3s ease-in-out infinite}
 @keyframes glowPulse{0%,100%{opacity:.6}50%{opacity:1}}
@@ -4471,7 +4475,7 @@ input:checked + .slider:before {
   </table>
 </div>
 
-<div class="charts"><div class="card eq-wrap"><div class="card-title" style="display:flex;justify-content:space-between;align-items:center;"><span>📊 PERFORMANCE TRAJECTORY</span><div class="chart-tabs"><button id="btnEquityWeb" class="chart-tab active" onclick="switchWebChart('equity')">📈 Equity Curve</button><button id="btnDrawdownWeb" class="chart-tab" onclick="switchWebChart('drawdown')">📉 Drawdown</button></div></div><div class="chart-box" style="position:relative;" id="equityWebChartContainer"><canvas id="eq"></canvas><canvas id="eqSpark"></canvas><div class="eq-glow"></div></div><div class="chart-box" style="position:relative;display:none;" id="drawdownWebChartContainer"><canvas id="ddChart"></canvas></div></div><div class="card"><div class="card-title">Win/Loss Per Trade</div><div class="chart-box" style="position:relative;"><canvas id="wl"></canvas></div></div></div>
+<div class="charts"><div class="card eq-wrap"><div class="card-title" style="display:flex;justify-content:space-between;align-items:center;"><span>📊 PERFORMANCE TRAJECTORY</span><div class="chart-tabs"><button id="btnEquityWeb" class="chart-tab active" onclick="switchWebChart('equity')">📈 Equity Curve</button><button id="btnDrawdownWeb" class="chart-tab" onclick="switchWebChart('drawdown')">📉 Drawdown</button></div></div><div class="chart-box" style="position:relative;" id="equityWebChartContainer"><div id="eqWrapper" style="width:100%;height:100%;position:relative;"><canvas id="eq"></canvas><canvas id="eqSpark"></canvas></div><div class="eq-glow"></div></div><div class="chart-box" style="position:relative;display:none;" id="drawdownWebChartContainer"><div id="ddWrapper" style="width:100%;height:100%;position:relative;"><canvas id="ddChart"></canvas></div></div></div><div class="card"><div class="card-title">Win/Loss Per Trade</div><div class="chart-box" style="position:relative;" id="wlChartContainer"><div id="wlWrapper" style="width:100%;height:100%;position:relative;"><canvas id="wl"></canvas></div></div></div></div>
 
 <div class="bottom"><div class="card"><div class="card-title">Trade History</div><div class="table-scroll"><table><thead><tr><th>Index</th><th>Date</th><th>Entry Time</th><th>Exit Time</th><th>Dir</th><th>Strike</th><th>Entry</th><th>Exit</th><th>Charges</th><th>PnL (Net)</th><th>Reason</th></tr></thead><tbody id="tTbl"><tr><td colspan="11" class="empty">No trades yet</td></tr></tbody></table></div></div></div>
 
@@ -4645,11 +4649,13 @@ function switchWebChart(type) {
     btnDd.classList.remove('active');
     boxEq.style.display = 'block';
     boxDd.style.display = 'none';
+    setTimeout(() => { boxEq.scrollLeft = 999999; }, 50);
   } else {
     btnDd.classList.add('active');
     btnEq.classList.remove('active');
     boxDd.style.display = 'block';
     boxEq.style.display = 'none';
+    setTimeout(() => { boxDd.scrollLeft = 999999; }, 50);
   }
 }
 
@@ -5419,6 +5425,20 @@ async function load(){
     const labels=(d.equity||[]).map((_,i)=>'#'+(i+1));
     const eqData=d.equity||[];
     const pnls=(d.trades||[]).map(t=>+t.pnl);
+
+    // Dynamic width calculation to show at least 10 trades before scrolling horizontally
+    const N = eqData.length;
+    const scrollWidth = N > 10 ? `${N * 55}px` : '100%';
+    document.getElementById('eqWrapper').style.width = scrollWidth;
+    document.getElementById('ddWrapper').style.width = scrollWidth;
+    document.getElementById('wlWrapper').style.width = scrollWidth;
+
+    // Auto-scroll to show the latest trades first
+    setTimeout(() => {
+        document.getElementById('equityWebChartContainer').scrollLeft = 999999;
+        document.getElementById('drawdownWebChartContainer').scrollLeft = 999999;
+        document.getElementById('wlChartContainer').scrollLeft = 999999;
+    }, 150);
     // 3D Equity chart
     const lastVal=eqData.length?eqData[eqData.length-1]:0;
     if(eqC){eqC.destroy();eqC=null;}
