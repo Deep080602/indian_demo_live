@@ -3495,7 +3495,7 @@ body::before {
 .idx-pnl{font-size:13px;font-weight:700;font-family:'JetBrains Mono',monospace;white-space:nowrap}
 .card.nifty-card{border-color:rgba(0,240,255,.22);background:rgba(0,240,255,0.015)}
 .card.sensex-card{border-color:rgba(255,230,0,.22);background:rgba(255,230,0,0.015)}
-.table-scroll{max-height:230px;overflow-y:auto;overflow-x:auto;scrollbar-width:thin;scrollbar-color:var(--accent) transparent}
+.table-scroll{max-height:260px;overflow-y:auto;overflow-x:auto;scrollbar-width:thin;scrollbar-color:var(--accent) transparent}
 .table-scroll::-webkit-scrollbar{width:6px}
 .table-scroll::-webkit-scrollbar-track{background:transparent}
 .table-scroll::-webkit-scrollbar-thumb{background:rgba(157,78,221,0.4);border-radius:10px}
@@ -3509,10 +3509,10 @@ body::before {
 .index-table-scroll th{position:sticky;top:0;background:#0d1222;z-index:10;box-shadow:inset 0 -1px 0 rgba(255,255,255,0.08)}
 table{width:100%;border-collapse:collapse}
 thead tr{border-bottom:1px solid var(--border)}
-th{padding:14px 14px;font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:1.2px;text-align:left;font-weight:800}
+th{padding:8px 10px;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1.2px;text-align:left;font-weight:800}
 tbody tr{border-bottom:1px solid rgba(255,255,255,.04);transition:background 0.2s ease;}
 tbody tr:hover{background:rgba(255,255,255,.03)}
-td{padding:12px 14px;font-size:11.5px;font-family:'JetBrains Mono',monospace;color:#e2e8f0}
+td{padding:6px 10px;font-size:10.5px;font-family:'JetBrains Mono',monospace;color:#e2e8f0}
 .empty{color:var(--muted);text-align:center;padding:32px;font-size:12px;}
 .badge{display:inline-block;padding:3px 8px;border-radius:4px;font-size:10px;font-weight:800;letter-spacing:0.5px;}
 .badge.call{background:rgba(0,240,255,0.08);border:1px solid rgba(0,240,255,0.2);color:var(--blue)}.badge.put{background:rgba(255,0,127,0.08);border:1px solid rgba(255,0,127,0.2);color:var(--red)}

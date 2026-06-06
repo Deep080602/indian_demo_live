@@ -232,25 +232,34 @@ HTML_TEMPLATE = """
             padding-bottom: 10px;
         }
 
+        #trade-table-container {
+            max-height: 260px;
+            overflow-y: auto;
+        }
+
         table {
             width: 100%;
             border-collapse: collapse;
         }
 
         th {
-            background: rgba(255,255,255,0.1);
-            padding: 15px;
+            background: #25395f; /* Solid to prevent overlap showing through sticky header */
+            padding: 8px 10px;
             text-align: left;
             font-weight: 600;
             border-bottom: 2px solid rgba(255,255,255,0.2);
             text-transform: uppercase;
-            font-size: 0.85em;
+            font-size: 0.8em;
             letter-spacing: 0.5px;
+            position: sticky;
+            top: 0;
+            z-index: 1;
         }
 
         td {
-            padding: 12px 15px;
+            padding: 6px 10px;
             border-bottom: 1px solid rgba(255,255,255,0.1);
+            font-size: 0.82em;
         }
 
         tr:hover {
