@@ -641,9 +641,7 @@ HTML_TEMPLATE = """
                 pnlData.push(cumulative);
             });
 
-            // Dynamic width calculation to show at least 10 trades before scrolling horizontally
-            const N = trades.length;
-            const scrollWidth = N > 10 ? `${N * 55}px` : '100%';
+            const scrollWidth = `max(100%, ${N * 55}px)`;
             const pnlWrap = document.getElementById('pnlWrapper');
             const ddWrap = document.getElementById('ddWrapper');
             if (pnlWrap) pnlWrap.style.width = scrollWidth;

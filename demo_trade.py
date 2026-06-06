@@ -5427,8 +5427,7 @@ async function load(){
     const pnls=(d.trades||[]).map(t=>+t.pnl);
 
     // Dynamic width calculation to show at least 10 trades before scrolling horizontally
-    const N = eqData.length;
-    const scrollWidth = N > 10 ? `${N * 55}px` : '100%';
+    const scrollWidth = `max(100%, ${N * 55}px)`;
     document.getElementById('eqWrapper').style.width = scrollWidth;
     document.getElementById('ddWrapper').style.width = scrollWidth;
     document.getElementById('wlWrapper').style.width = scrollWidth;
