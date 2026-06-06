@@ -16,6 +16,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -264,8 +265,10 @@ fun NiftyTraderApp() {
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.fillMaxWidth()
                     ) {
+                        Logo3D(modifier = Modifier.size(24.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "⬡ ALGO PULSE",
+                            text = "ALGO PULSE",
                             style = MaterialTheme.typography.titleMedium.copy(
                                 fontWeight = FontWeight.Black,
                                 color = Color.White,
@@ -372,25 +375,7 @@ fun NiftyTraderApp() {
                                 fontFamily = FontFamily.Monospace
                             )
                             Spacer(modifier = Modifier.height(12.dp))
-                            OutlinedTextField(
-                                value = rawBaseUrl,
-                                onValueChange = { rawBaseUrl = it },
-                                label = { Text("API Backend URL", color = ColorMuted, fontFamily = FontFamily.Monospace) },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                                textStyle = LocalTextStyle.current.copy(color = ColorText, fontFamily = FontFamily.Monospace),
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-                            OutlinedTextField(
-                                value = username,
-                                onValueChange = { username = it },
-                                label = { Text("Algo Pulse Username", color = ColorMuted, fontFamily = FontFamily.Monospace) },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                                textStyle = LocalTextStyle.current.copy(color = ColorText, fontFamily = FontFamily.Monospace)
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
+
                             Button(
                                 onClick = {
                                     isAuthenticated = false
@@ -3746,8 +3731,10 @@ fun AuthScreen(
                 .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            Logo3D(modifier = Modifier.size(72.dp))
+            Spacer(modifier = Modifier.height(12.dp))
             Text(
-                text = "⬡ ALGO PULSE",
+                text = "ALGO PULSE",
                 style = MaterialTheme.typography.headlineMedium.copy(
                     fontWeight = FontWeight.Black,
                     color = Color.White,
@@ -4008,5 +3995,142 @@ suspend fun performAuth(
         }
     } catch (e: Exception) {
         Pair(false, e.message ?: "Network error occurred")
+    }
+}
+
+// =============================================================================
+// 3D HEXAGON LOGO COMPOSABLE
+// =============================================================================
+
+@Composable
+fun Logo3D(modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val R = minOf(w, h) / 2f
+        val cx = w / 2f
+        val cy = h / 2f
+
+        // 1. Drop Shadow / Ambient Glow (soft radial gradient)
+        val glowPath = Path().apply {
+            for (i in 0..5) {
+                val angleRad = Math.toRadians((i * 60 - 90).toDouble())
+                val x = cx + (R * 0.95f) * Math.cos(angleRad).toFloat()
+                val y = cy + (R * 0.95f) * Math.sin(angleRad).toFloat()
+                if (i == 0) moveTo(x, y) else lineTo(x, y)
+            }
+            close()
+        }
+        drawPath(
+            path = glowPath,
+            brush = Brush.radialGradient(
+                colors = listOf(ColorBlue.copy(alpha = 0.4f), Color.Transparent),
+                center = Offset(cx, cy),
+                radius = R * 1.2f
+            )
+        )
+
+        // 2. 3D Extrusion Layer (Bevel/Depth)
+        val depthOffset = R * 0.12f
+        val depthPath = Path().apply {
+            for (i in 0..5) {
+                val angleRad = Math.toRadians((i * 60 - 90).toDouble())
+                val x = cx + depthOffset + (R * 0.75f) * Math.cos(angleRad).toFloat()
+                val y = cy + depthOffset + (R * 0.75f) * Math.sin(angleRad).toFloat()
+                if (i == 0) moveTo(x, y) else lineTo(x, y)
+            }
+            close()
+        }
+        drawPath(
+            path = depthPath,
+            brush = Brush.linearGradient(
+                colors = listOf(Color(0xFF004488), Color(0xFF440088)),
+                start = Offset(0f, 0f),
+                end = Offset(w, h)
+            )
+        )
+
+        // 3. Connecting sides for solid 3D extrusion look
+        val frontR = R * 0.75f
+        val frontCx = cx
+        val frontCy = cy
+        val backCx = cx + depthOffset
+        val backCy = cy + depthOffset
+
+        for (i in 0..5) {
+            val a1 = Math.toRadians((i * 60 - 90).toDouble())
+            val a2 = Math.toRadians(((i + 1) * 60 - 90).toDouble())
+            val p1Front = Offset(frontCx + frontR * Math.cos(a1).toFloat(), frontCy + frontR * Math.sin(a1).toFloat())
+            val p2Front = Offset(frontCx + frontR * Math.cos(a2).toFloat(), frontCy + frontR * Math.sin(a2).toFloat())
+            val p1Back = Offset(backCx + frontR * Math.cos(a1).toFloat(), backCy + frontR * Math.sin(a1).toFloat())
+            val p2Back = Offset(backCx + frontR * Math.cos(a2).toFloat(), backCy + frontR * Math.sin(a2).toFloat())
+
+            val sidePath = Path().apply {
+                moveTo(p1Front.x, p1Front.y)
+                lineTo(p2Front.x, p2Front.y)
+                lineTo(p2Back.x, p2Back.y)
+                lineTo(p1Back.x, p1Back.y)
+                close()
+            }
+            val sideColor = if (i in 1..3) Color(0xFF0A1128) else Color(0xFF1E295D)
+            drawPath(path = sidePath, color = sideColor)
+        }
+
+        // 4. Front Face Hexagon
+        val frontPath = Path().apply {
+            for (i in 0..5) {
+                val angleRad = Math.toRadians((i * 60 - 90).toDouble())
+                val x = frontCx + frontR * Math.cos(angleRad).toFloat()
+                val y = frontCy + frontR * Math.sin(angleRad).toFloat()
+                if (i == 0) moveTo(x, y) else lineTo(x, y)
+            }
+            close()
+        }
+        drawPath(
+            path = frontPath,
+            brush = Brush.linearGradient(
+                colors = listOf(ColorBlue, ColorAccent),
+                start = Offset(0f, 0f),
+                end = Offset(w, h)
+            )
+        )
+
+        // 5. Inner Hexagon Cutout (to make it hollow/ring-like)
+        val innerR = frontR * 0.6f
+        val innerPath = Path().apply {
+            for (i in 0..5) {
+                val angleRad = Math.toRadians((i * 60 - 90).toDouble())
+                val x = frontCx + innerR * Math.cos(angleRad).toFloat()
+                val y = frontCy + innerR * Math.sin(angleRad).toFloat()
+                if (i == 0) moveTo(x, y) else lineTo(x, y)
+            }
+            close()
+        }
+        drawPath(
+            path = innerPath,
+            color = ColorBG
+        )
+
+        // 6. Highlight Rim on Front Face (adds a gloss/reflection effect)
+        drawPath(
+            path = frontPath,
+            brush = Brush.linearGradient(
+                colors = listOf(Color.White.copy(alpha = 0.6f), Color.Transparent),
+                start = Offset(0f, 0f),
+                end = Offset(w * 0.8f, h * 0.8f)
+            ),
+            style = Stroke(width = R * 0.05f)
+        )
+
+        // 7. Inner Hexagon Rim Glow
+        drawPath(
+            path = innerPath,
+            brush = Brush.linearGradient(
+                colors = listOf(ColorGreen, ColorBlue),
+                start = Offset(0f, 0f),
+                end = Offset(w, h)
+            ),
+            style = Stroke(width = R * 0.04f)
+        )
     }
 }
