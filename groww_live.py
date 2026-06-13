@@ -59,16 +59,33 @@ def place_groww_order(sec_id: str, action: str, quantity: int, index: str, clien
             
         log.info(f"[GROWW] Place order response: {order_resp}")
         if order_resp.get("status") == "success" or "orderId" in str(order_resp) or "groww_order_id" in order_resp:
-            data = order_resp.get("data", {})
-            if isinstance(data, dict):
-                order_id = str(data.get("orderId", ""))
+            # Parse order ID correctly by checking root keys first
+            order_id = str(order_resp.get("groww_order_id") or order_resp.get("orderId") or "")
+            if not order_id:
+                data = order_resp.get("data", {})
+                if isinstance(data, dict):
+                    order_id = str(data.get("orderId") or data.get("groww_order_id") or "")
+            
+            if order_id:
+                log.info(f"[GROWW] ✅ Live order placed successfully! OrderID: {order_id}")
+                return order_id
             else:
-                order_id = str(order_resp.get("orderId", order_resp.get("groww_order_id", "")))
-            log.info(f"[GROWW] ✅ Live order placed successfully! OrderID: {order_id}")
-            return order_id
+                log.error("[GROWW] ❌ Placed order but orderId / groww_order_id could not be parsed.")
         else:
             remarks = order_resp.get("remarks", order_resp.get("remark", "Unknown error"))
             log.error(f"[GROWW] ❌ Live order placement failed: {remarks}.")
     except Exception as e:
-        log.error(f"[GROWW] ❌ Exception placing live order: {e}.")
+        err_msg = str(e)
+        if "unregistered IP" in err_msg or "No registered IPs" in err_msg or "registered IP" in err_msg:
+            try:
+                import requests
+                public_ip = requests.get("https://api.ipify.org", timeout=5).text.strip()
+            except Exception:
+                public_ip = "Unknown"
+            log.error(
+                f"[GROWW] ❌ IP ADDRESS NOT REGISTERED: You must register your public IP address in the Groww Cloud developer console. "
+                f"Go to https://groww.in/trade-api/api-keys and add your public IP address: {public_ip}"
+            )
+        else:
+            log.error(f"[GROWW] ❌ Exception placing live order: {e}.")
     return None

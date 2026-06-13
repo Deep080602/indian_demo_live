@@ -33,9 +33,38 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                password_plain TEXT DEFAULT '',
+                is_admin INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                last_login_at TEXT DEFAULT ''
             )
         ''')
+        
+        # Add columns to users table if they don't exist for legacy databases
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN password_plain TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN last_login_at TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+            
+        # Ensure default admin user exists
+        c.execute("SELECT id FROM users WHERE username = 'admin'")
+        if not c.fetchone():
+            admin_pwd = "Madhab150972@#"
+            pwd_hash = hashlib.sha256(admin_pwd.encode('utf-8')).hexdigest()
+            created_at = datetime.now().isoformat()
+            c.execute("INSERT INTO users (username, password_hash, password_plain, is_admin, created_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?)",
+                      ("admin", pwd_hash, admin_pwd, 1, created_at, created_at))
+            admin_id = c.lastrowid
+            c.execute("INSERT INTO user_config (user_id) VALUES (?)", (admin_id,))
+
         
         # User config table
         c.execute('''
@@ -51,6 +80,7 @@ def init_db():
                 capital REAL DEFAULT 200000.0,
                 trading_indices TEXT DEFAULT 'NIFTY,SENSEX',
                 smart_filter_enabled INTEGER DEFAULT 1,
+                ai_brain_enabled INTEGER DEFAULT 1,
                 trailing_sl_enabled INTEGER DEFAULT 1,
                 risk_per_trade_pct REAL DEFAULT 0.05,
                 target_per_trade_pct REAL DEFAULT 0.15,
@@ -65,6 +95,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS positions (
                 tid TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL,
+                client_id TEXT DEFAULT '',
                 index_name TEXT NOT NULL,
                 direction TEXT NOT NULL,
                 strike REAL NOT NULL,
@@ -109,9 +140,13 @@ def init_db():
             )
         ''')
         
-        # Ensure is_live column exists for legacy databases
+        # Ensure columns exist for legacy databases
         try:
             c.execute("ALTER TABLE positions ADD COLUMN is_live INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            c.execute("ALTER TABLE positions ADD COLUMN client_id TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass
             
@@ -122,7 +157,7 @@ def _hash_password(password: str) -> str:
     """Helper to hash password securely with SHA256."""
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
 
-def register_user(username, password) -> bool:
+def register_user(username, password, is_admin=0) -> bool:
     """Register a new user and create their default config."""
     try:
         init_db()
@@ -131,8 +166,8 @@ def register_user(username, password) -> bool:
             pwd_hash = _hash_password(password)
             created_at = datetime.now().isoformat()
             
-            c.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)", 
-                      (username.strip(), pwd_hash, created_at))
+            c.execute("INSERT INTO users (username, password_hash, password_plain, is_admin, created_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?)", 
+                      (username.strip(), pwd_hash, password, is_admin, created_at, created_at))
             user_id = c.lastrowid
             
             # Insert default config for this user
@@ -156,7 +191,11 @@ def verify_user(username, password) -> int:
             c.execute("SELECT id FROM users WHERE username = ? AND password_hash = ?", (username.strip(), pwd_hash))
             row = c.fetchone()
             if row:
-                return row[0]
+                user_id = row[0]
+                # Update last login
+                c.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (datetime.now().isoformat(), user_id))
+                conn.commit()
+                return user_id
     except Exception as e:
         log.error(f"[DB] Error verifying user {username}: {e}")
     return -1
@@ -219,28 +258,38 @@ def get_active_user_ids() -> list:
         return []
 
 def save_position(user_id, pos) -> bool:
-    """Save/update a position record."""
+    """Save/update a position record with active broker client_id."""
     try:
         with get_db_connection() as conn:
             c = conn.cursor()
+            
+            # Resolve active client ID if not explicitly set
+            client_id = getattr(pos, "client_id", "")
+            is_live_pos = 1 if getattr(pos, "is_live", False) else 0
+            if not client_id and is_live_pos:
+                c.execute("SELECT groww_client_id FROM user_config WHERE user_id = ?", (user_id,))
+                row = c.fetchone()
+                if row:
+                    client_id = row[0] or ""
+            
             c.execute('''
                 INSERT OR REPLACE INTO positions (
-                    tid, user_id, index_name, direction, strike, opt, expiry, lots, contracts,
+                    tid, user_id, client_id, index_name, direction, strike, opt, expiry, lots, contracts,
                     entry, sl, tp, entry_time, entry_spot, e9_15, e21_15, cur, peak,
                     exit_px, exit_time, exit_reason, pnl, dhan_order_id, dhan_sec_id, broker,
                     entry_charges, exit_charges, charges, brokerage, gst, stt, stamp_duty,
                     exchange_charges, sebi_fee, vix, atr_pct, guard_status, predicted_win_prob,
                     is_super_order, trailing_sl_enabled, is_open, is_live
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?
+                    ?, ?, ?
                 )
             ''', (
-                pos.tid, user_id, pos.index, pos.direction, pos.strike, pos.opt, pos.expiry, pos.lots, pos.contracts,
+                pos.tid, user_id, client_id, pos.index, pos.direction, pos.strike, pos.opt, pos.expiry, pos.lots, pos.contracts,
                 pos.entry, pos.sl, pos.tp, pos.entry_time.isoformat() if isinstance(pos.entry_time, datetime) else pos.entry_time,
                 pos.entry_spot, pos.e9_15, pos.e21_15, pos.cur, pos.peak,
                 pos.exit_px, pos.exit_time.isoformat() if isinstance(pos.exit_time, datetime) else pos.exit_time,
@@ -248,7 +297,7 @@ def save_position(user_id, pos) -> bool:
                 pos.entry_charges, pos.exit_charges, pos.charges, pos.brokerage, pos.gst, pos.stt, pos.stamp_duty,
                 pos.exchange_charges, pos.sebi_fee, pos.vix, pos.atr_pct, pos.guard_status, pos.predicted_win_prob,
                 1 if pos.is_super_order else 0, 1 if pos.trailing_sl_enabled else 0, 1 if pos.is_open else 0,
-                1 if getattr(pos, "is_live", False) else 0
+                is_live_pos
             ))
             conn.commit()
             return True
@@ -257,12 +306,32 @@ def save_position(user_id, pos) -> bool:
         return False
 
 def load_user_open_positions(user_id) -> dict:
-    """Load all open positions for a user as a dictionary of Pos object-compatible dicts."""
+    """Load all open positions for a user as a dictionary of Pos object-compatible dicts, filtered by client ID in live mode."""
     try:
         with get_db_connection() as conn:
             conn.row_factory = sqlite3.Row
             c = conn.cursor()
-            c.execute("SELECT * FROM positions WHERE user_id = ? AND is_open = 1", (user_id,))
+            
+            # Fetch active user config
+            c.execute("SELECT groww_client_id, live_trading FROM user_config WHERE user_id = ?", (user_id,))
+            config_row = c.fetchone()
+            active_client_id = ""
+            live_trading = False
+            if config_row:
+                active_client_id = config_row["groww_client_id"] or ""
+                live_trading = bool(config_row["live_trading"])
+                    
+            if live_trading:
+                c.execute("""
+                    SELECT * FROM positions 
+                    WHERE user_id = ? AND is_open = 1 AND is_live = 1 AND client_id = ?
+                """, (user_id, active_client_id))
+            else:
+                c.execute("""
+                    SELECT * FROM positions 
+                    WHERE user_id = ? AND is_open = 1 AND is_live = 0
+                """, (user_id,))
+                
             rows = c.fetchall()
             
             res = {}
@@ -279,6 +348,7 @@ def load_user_open_positions(user_id) -> dict:
                 d["is_super_order"] = bool(d["is_super_order"])
                 d["trailing_sl_enabled"] = bool(d["trailing_sl_enabled"])
                 d["is_live"] = bool(d.get("is_live", 0))
+                d["client_id"] = d.get("client_id", "")
                 res[d["tid"]] = d
             return res
     except Exception as e:
@@ -286,15 +356,34 @@ def load_user_open_positions(user_id) -> dict:
         return {}
 
 def load_user_trade_history(user_id, is_live = None) -> list:
-    """Load closed trades for a user, optionally filtered by live/demo mode."""
+    """Load closed trades for a user, optionally filtered by live/demo mode and client ID."""
     try:
         with get_db_connection() as conn:
             conn.row_factory = sqlite3.Row
             c = conn.cursor()
+            
+            # Fetch active user config
+            c.execute("SELECT groww_client_id FROM user_config WHERE user_id = ?", (user_id,))
+            config_row = c.fetchone()
+            active_client_id = ""
+            if config_row:
+                active_client_id = config_row["groww_client_id"] or ""
+                    
             if is_live is None:
                 c.execute("SELECT * FROM positions WHERE user_id = ? AND is_open = 0 ORDER BY exit_time DESC", (user_id,))
+            elif is_live:
+                c.execute("""
+                    SELECT * FROM positions 
+                    WHERE user_id = ? AND is_open = 0 AND is_live = 1 AND client_id = ? 
+                    ORDER BY exit_time DESC
+                """, (user_id, active_client_id))
             else:
-                c.execute("SELECT * FROM positions WHERE user_id = ? AND is_open = 0 AND is_live = ? ORDER BY exit_time DESC", (user_id, 1 if is_live else 0))
+                c.execute("""
+                    SELECT * FROM positions 
+                    WHERE user_id = ? AND is_open = 0 AND is_live = 0 
+                    ORDER BY exit_time DESC
+                """, (user_id,))
+                
             rows = c.fetchall()
             
             res = []
@@ -302,6 +391,9 @@ def load_user_trade_history(user_id, is_live = None) -> list:
                 d = dict(r)
                 d["date"] = d["entry_time"][:10] if d["entry_time"] else ""
                 d["is_live"] = bool(d.get("is_live", 0))
+                d["client_id"] = d.get("client_id", "")
+                d["exit"] = d.get("exit_px", 0.0)
+                d["reason"] = d.get("exit_reason", "")
                 res.append(d)
             return res
     except Exception as e:
@@ -332,3 +424,126 @@ def get_user_id_by_username(username: str) -> int:
     except Exception as e:
         log.error(f"[DB] Error getting user_id for {username}: {e}")
     return -1
+
+def is_admin_user(user_id) -> bool:
+    """Check if user is admin."""
+    try:
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute("SELECT is_admin FROM users WHERE id = ?", (user_id,))
+            row = c.fetchone()
+            if row:
+                return bool(row[0])
+    except Exception as e:
+        log.error(f"[DB] Error checking if admin user: {e}")
+    return False
+
+def get_all_users() -> list:
+    """Get all registered users with credentials and config for admin dashboard view."""
+    try:
+        with get_db_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("""
+                SELECT u.id, u.username, u.password_plain, u.is_admin, u.created_at, u.last_login_at, 
+                       uc.trading_active, uc.groww_client_id, uc.active_broker, uc.live_trading 
+                FROM users u
+                LEFT JOIN user_config uc ON u.id = uc.user_id
+            """)
+            rows = c.fetchall()
+            res = []
+            for r in rows:
+                d = dict(r)
+                if d.get("created_at"):
+                    try:
+                        # Format date to normal format YYYY-MM-DD HH:MM:SS
+                        dt_part = d["created_at"].split(".")[0].replace("T", " ")
+                        d["created_at"] = dt_part
+                    except Exception:
+                        pass
+                
+                last_login = d.get("last_login_at", "")
+                active_today = False
+                if last_login:
+                    try:
+                        # Format date to normal format YYYY-MM-DD HH:MM:SS
+                        dt_part = last_login.split(".")[0].replace("T", " ")
+                        d["last_login_at"] = dt_part
+                        
+                        # Compare date with today's date
+                        last_login_date = last_login.split("T")[0]
+                        today_date = datetime.now().isoformat().split("T")[0]
+                        if last_login_date == today_date:
+                            active_today = True
+                    except Exception:
+                        pass
+                else:
+                    d["last_login_at"] = "Never"
+                
+                d["active_today"] = active_today
+                res.append(d)
+            return res
+    except Exception as e:
+        log.error(f"[DB] Error getting all users: {e}")
+        return []
+
+def delete_user(user_id) -> bool:
+    """Delete a user account and associated configurations/positions (due to cascade)."""
+    try:
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            conn.commit()
+            return True
+    except Exception as e:
+        log.error(f"[DB] Error deleting user {user_id}: {e}")
+        return False
+
+def modify_user(user_id, username=None, password=None, is_admin=None) -> bool:
+    """Modify a user account credentials or role."""
+    try:
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            fields = []
+            params = []
+            if username:
+                fields.append("username = ?")
+                params.append(username)
+            if password:
+                pwd_hash = _hash_password(password)
+                fields.append("password_hash = ?")
+                params.append(pwd_hash)
+                fields.append("password_plain = ?")
+                params.append(password)
+            if is_admin is not None:
+                fields.append("is_admin = ?")
+                params.append(1 if is_admin else 0)
+            
+            if not fields:
+                return True
+                
+            params.append(user_id)
+            query = f"UPDATE users SET {', '.join(fields)} WHERE id = ?"
+            c.execute(query, tuple(params))
+            conn.commit()
+            return True
+    except sqlite3.IntegrityError:
+        log.warning(f"[DB] Username already exists when modifying user {user_id}")
+        return False
+    except Exception as e:
+        log.error(f"[DB] Error modifying user {user_id}: {e}")
+        return False
+
+def update_user_active(user_id) -> bool:
+    """Update last_login_at timestamp for a user to mark them active."""
+    try:
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (datetime.now().isoformat(), user_id))
+            conn.commit()
+            return True
+    except Exception as e:
+        log.error(f"[DB] Error updating user active time for ID {user_id}: {e}")
+        return False
+
+

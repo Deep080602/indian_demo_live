@@ -1,5 +1,5 @@
 """
-config.py — Central configuration for the Dhan Options Paper Trader.
+config.py — Central configuration for the ALGO PULSE Paper Trader.
 Edit ONLY this file to change credentials, capital, index, and risk settings.
 """
 
@@ -88,7 +88,7 @@ class TradingConfig:
     # ─── Execution / Session ─────────────────────────────────────────────────
     paper_trading: bool = True
     scan_interval_seconds: int = 60     # How often the main loop scans (1 min)
-    market_open: str = "09:18"          # Early scan — catch morning momentum
+    market_open: str = "09:15"          # Early scan — catch morning momentum
     market_close: str = "15:25"         # Capture full day movement
     force_exit_time: str = "15:25"      # Hard exit all positions at close
     log_file: str = "trades.csv"
@@ -121,7 +121,20 @@ class TradingConfig:
 
     # ─── ntfy.sh Mobile Push Alerts (Zero API/Keyless) ───────────────────────
     ntfy_enabled: bool = True                  # Set to True to enable ntfy mobile alerts
-    ntfy_topic: str = "dhan_algo_alerts_dipma" # Custom unique/secret topic path for your push alerts
+    ntfy_topic: str = "algo_pulse_alerts_dipma" # Custom unique/secret topic path for your push alerts
+
+    # ─── Telegram Alerts ──────────────────────────────────────────────────────
+    telegram_enabled: bool = os.environ.get("TELEGRAM_ENABLED", "False").lower() in ("true", "1", "yes")
+    telegram_token: str = os.environ.get("TELEGRAM_TOKEN", "")
+    telegram_chat_id: str = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+    # ─── AI / LLM Trading Brain ──────────────────────────────────────────────
+    ai_brain_enabled: bool = True              # Enable/Disable the AI Brain module
+    ai_autonomous_trading: bool = False        # Enable AI to place trades autonomously
+    ai_model_type: str = "neural_network"       # "neural_network" or "gemini_llm"
+    gemini_api_key: str = os.environ.get("GEMINI_API_KEY", "")
+
+
 
     # ─── Multi-Timeframe Candle Lengths ──────────────────────────────────────
     htf_minutes: int = 15   # Higher timeframe (trend)

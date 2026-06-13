@@ -144,6 +144,37 @@ def send_ntfy(message: str, title: str = None, priority: int = 3, tags: str = No
     except Exception as e:
         print(f"[ALERT ERROR] Failed to send ntfy.sh notification: {e}")
 
+def send_telegram(message: str):
+    """Send a Telegram alert using the Telegram Bot API."""
+    try:
+        from config import cfg
+    except ImportError:
+        return
+
+    if not getattr(cfg, "telegram_enabled", False):
+        return
+
+    token = getattr(cfg, "telegram_token", "").strip()
+    chat_id = getattr(cfg, "telegram_chat_id", "").strip()
+    if not token or not chat_id:
+        print("[ALERT ERROR] Telegram Bot Token or Chat ID is missing in config.py")
+        return
+
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "Markdown"
+        }
+        r = requests.post(url, json=payload, timeout=8)
+        if r.status_code == 200:
+            print("[ALERT] Telegram notification sent successfully.")
+        else:
+            print(f"[ALERT ERROR] Telegram returned status {r.status_code}: {r.text}")
+    except Exception as e:
+        print(f"[ALERT ERROR] Failed to send Telegram notification: {e}")
+
 if sys.stdout is not None:
     try:
         sys.stdout.reconfigure(encoding='utf-8')
@@ -209,7 +240,7 @@ def sound_alert(alert_type: str = "info"):
     except Exception:
         pass
 
-def alert_entry(direction: str, strike: float, entry: float, sl: float, tp: float, index: str = "NIFTY", lots: int = 5, contracts: int = 325, guard_status: str = "Disabled", predicted_win_prob: float = 100.0):
+def alert_entry(direction: str, strike: float, entry: float, sl: float, tp: float, index: str = "NIFTY", lots: int = 5, contracts: int = 325, guard_status: str = "Disabled", predicted_win_prob: float = 100.0, ai_rationale: str = ""):
     """Alert on trade entry."""
     opt = "CALL" if direction == "CALL" else "PUT"
     display_index = "NIFTY_ALGO_SHARK" if index == "NIFTY" else index
@@ -227,7 +258,7 @@ def alert_entry(direction: str, strike: float, entry: float, sl: float, tp: floa
     else:
         guard_text = "⚠️ Disabled (Pure Signal)"
 
-    # Send WhatsApp Alert
+    # Send WhatsApp/Telegram/ntfy Alerts
     wa_msg = (
         f"🛡️ *[SMART ALGO] TRADE ENTRY*\n\n"
         f"📍 *Index*: {display_index}\n"
@@ -238,7 +269,11 @@ def alert_entry(direction: str, strike: float, entry: float, sl: float, tp: floa
         f"📦 *Lots*: {lots} ({contracts} contracts)\n"
         f"🛡️ *Guard Status*: {guard_text}"
     )
+    if ai_rationale:
+        wa_msg += f"\n🧠 *AI Brain*: {ai_rationale}"
+
     send_whatsapp(wa_msg)
+    send_telegram(wa_msg)
     send_ntfy(wa_msg, title=title, priority=4, tags="chart_with_upwards_trend,bell")
     print(f"\n{'='*60}")
     print(f"  [ENTRY] TRADE ENTRY ALERT")
@@ -251,7 +286,8 @@ def alert_entry(direction: str, strike: float, entry: float, sl: float, tp: floa
     print(f"  Smart Guard: {guard_text}")
     print(f"{'='*60}\n")
 
-def alert_win(tid: str, pnl: float, pnl_pct: float, exit_price: float, lots: int = 5, contracts: int = 325):
+def alert_win(tid: str, pnl: float, pnl_pct: float, exit_price: float, lots: int = 5, contracts: int = 325,
+              index: str = None, direction: str = None, strike: float = None, opt: str = None, entry: float = None):
     """Alert on winning trade."""
     title = f"[WIN] +Rs.{pnl:,.0f} | {lots} Lots Exited"
     message = f"P&L: +Rs.{pnl:,.0f} ({pnl_pct:+.1f}%)\nLots Exited: {lots}"
@@ -259,15 +295,27 @@ def alert_win(tid: str, pnl: float, pnl_pct: float, exit_price: float, lots: int
     sound_alert("win")
     desktop_notify(title, message)
 
-    # Send WhatsApp Alert
+    details = ""
+    if index and direction and strike and opt:
+        display_index = "NIFTY_ALGO_SHARK" if index == "NIFTY" else index
+        details = (
+            f"📍 *Index*: {display_index}\n"
+            f"📈 *Direction*: {direction}\n"
+            f"🎯 *Strike*: {int(strike)} ({opt})\n"
+            f"📥 *Entry Price*: Rs.{entry}\n"
+        )
+
+    # Send WhatsApp/Telegram/ntfy Alerts
     wa_msg = (
         f"✅ *[SMART ALGO] WINNING EXIT*\n\n"
+        f"{details}"
         f"🆔 *Trade ID*: {tid}\n"
         f"💵 *Net P&L*: +Rs.{pnl:,.2f} ({pnl_pct:+.2f}%)\n"
         f"🎯 *Exit Price*: Rs.{exit_price}\n"
         f"📦 *Lots*: {lots} ({contracts} contracts)"
     )
     send_whatsapp(wa_msg)
+    send_telegram(wa_msg)
     send_ntfy(wa_msg, title=title, priority=4, tags="heavy_check_mark,moneybag")
     print(f"\n{'='*60}")
     print(f"  [WIN] WINNING TRADE")
@@ -278,7 +326,8 @@ def alert_win(tid: str, pnl: float, pnl_pct: float, exit_price: float, lots: int
     print(f"  Exit: Rs.{exit_price}")
     print(f"{'='*60}\n")
 
-def alert_loss(tid: str, pnl: float, pnl_pct: float, exit_price: float, reason: str, lots: int = 5, contracts: int = 325):
+def alert_loss(tid: str, pnl: float, pnl_pct: float, exit_price: float, reason: str, lots: int = 5, contracts: int = 325,
+               index: str = None, direction: str = None, strike: float = None, opt: str = None, entry: float = None):
     """Alert on losing trade."""
     title = f"[LOSS] -Rs.{abs(pnl):,.0f} | {lots} Lots Exited"
     message = f"P&L: -Rs.{abs(pnl):,.0f} ({pnl_pct:.1f}%)\nLots Exited: {lots}"
@@ -286,9 +335,20 @@ def alert_loss(tid: str, pnl: float, pnl_pct: float, exit_price: float, reason: 
     sound_alert("loss")
     desktop_notify(title, message)
 
-    # Send WhatsApp Alert
+    details = ""
+    if index and direction and strike and opt:
+        display_index = "NIFTY_ALGO_SHARK" if index == "NIFTY" else index
+        details = (
+            f"📍 *Index*: {display_index}\n"
+            f"📈 *Direction*: {direction}\n"
+            f"🎯 *Strike*: {int(strike)} ({opt})\n"
+            f"📥 *Entry Price*: Rs.{entry}\n"
+        )
+
+    # Send WhatsApp/Telegram/ntfy Alerts
     wa_msg = (
         f"❌ *[SMART ALGO] LOSING EXIT*\n\n"
+        f"{details}"
         f"🆔 *Trade ID*: {tid}\n"
         f"💵 *Net P&L*: -Rs.{abs(pnl):,.2f} ({pnl_pct:.2f}%)\n"
         f"⚠️ *Reason*: {reason}\n"
@@ -296,6 +356,7 @@ def alert_loss(tid: str, pnl: float, pnl_pct: float, exit_price: float, reason: 
         f"📦 *Lots*: {lots} ({contracts} contracts)"
     )
     send_whatsapp(wa_msg)
+    send_telegram(wa_msg)
     send_ntfy(wa_msg, title=title, priority=4, tags="x,warning")
     print(f"\n{'='*60}")
     print(f"  [LOSS] LOSING TRADE")
@@ -318,7 +379,7 @@ def alert_target_hit(capital: float, cum_pnl: float):
 
     desktop_notify(title, message)
 
-    # Send WhatsApp Alert
+    # Send WhatsApp/Telegram/ntfy Alerts
     wa_msg = (
         f"🚀 *[SMART ALGO] GOAL TARGET HIT!*\n\n"
         f"💰 *Cumulative P&L*: +Rs.{cum_pnl:,.2f}\n"
@@ -326,6 +387,7 @@ def alert_target_hit(capital: float, cum_pnl: float):
         f"Automated execution has successfully hit its profit targets and locked in gains!"
     )
     send_whatsapp(wa_msg)
+    send_telegram(wa_msg)
     send_ntfy(wa_msg, title=title, priority=5, tags="rocket,trophy")
     print(f"\n{'#'*60}")
     print(f"  [TARGET HIT] PROFIT TARGET HIT!")
@@ -344,13 +406,14 @@ def alert_daily_halt(day_pnl: float):
 
     desktop_notify(title, message)
 
-    # Send WhatsApp Alert
+    # Send WhatsApp/Telegram/ntfy Alerts
     wa_msg = (
         f"⚠️ *[SMART ALGO] DAILY LOSS HALT*\n\n"
         f"💵 *Daily Net P&L*: -Rs.{abs(day_pnl):,.2f}\n"
         f"Daily drawdown limit reached. Automated scanning has been suspended to guard capital."
     )
     send_whatsapp(wa_msg)
+    send_telegram(wa_msg)
     send_ntfy(wa_msg, title=title, priority=5, tags="octagonal_sign,warning")
     print(f"\n{'!'*60}")
     print(f"  [HALT] DAILY LOSS LIMIT REACHED")

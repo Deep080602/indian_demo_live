@@ -1,14 +1,14 @@
-# Dhan Options Paper Trader — Institutional Grade
+# ALGO PULSE Options Paper Trader — Institutional Grade
 
 A production-ready, confluence-based options paper trading system for Indian indices
-(NIFTY / BANKNIFTY / FINNIFTY / SENSEX) using the **Dhan API**.
+(NIFTY / BANKNIFTY / FINNIFTY / SENSEX) using the **Groww & Dhan APIs**.
 
 ---
 
 ## Project Structure
 
 ```
-dhan_algo/
+algo_pulse/
 ├── config.py           ← ALL configuration lives here
 ├── dhan_client.py      ← Dhan API wrapper (retry, rate-limit, parsing)
 ├── market_data.py      ← Data feed manager (caching, multi-timeframe)
@@ -187,22 +187,22 @@ cat logs/trades.csv
 
 ### Supervisor Configuration
 ```ini
-; /etc/supervisor/conf.d/dhan_algo.conf
-[program:dhan_algo]
-command=python /home/ubuntu/dhan_algo/main.py
-directory=/home/ubuntu/dhan_algo
+; /etc/supervisor/conf.d/algo_pulse.conf
+[program:algo_pulse]
+command=python /home/ubuntu/algo_pulse/main.py
+directory=/home/ubuntu/algo_pulse
 autostart=true
 autorestart=true
 startretries=5
-stderr_logfile=/var/log/dhan_algo.err.log
-stdout_logfile=/var/log/dhan_algo.out.log
+stderr_logfile=/var/log/algo_pulse.err.log
+stdout_logfile=/var/log/algo_pulse.out.log
 environment=DHAN_CLIENT_ID="YOUR_ID",DHAN_ACCESS_TOKEN="YOUR_TOKEN"
 ```
 
 ### Crontab (Alternative)
 ```bash
 # Start at 9:00 AM on weekdays
-0 9 * * 1-5 cd /home/ubuntu/dhan_algo && python main.py >> logs/algo.log 2>&1
+0 9 * * 1-5 cd /home/ubuntu/algo_pulse && python main.py >> logs/algo.log 2>&1
 ```
 
 ### Recommended VPS Specs

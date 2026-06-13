@@ -6,10 +6,21 @@ Implements the exact authentication, parameters, and structure defined in the of
 import time
 import random
 import logging
-from typing import Dict, Optional
+import pyotp
+import re
+from typing import Dict, Optional, Any
 from config import cfg
 
 log = logging.getLogger(__name__)
+
+def _safe_float(val: Any) -> float:
+    """Safely convert any value to float, defaulting to 0.0 on None or parsing errors."""
+    if val is None:
+        return 0.0
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return 0.0
 
 class GrowwAPI:
     # Official Groww SDK Constants from documentation
@@ -32,9 +43,12 @@ class GrowwAPI:
             log.info("[GROWW] 🔑 GrowwAPI instance initialized with token.")
 
     @staticmethod
-    def get_access_token(api_key: str, secret: str) -> str:
-        """Official token generation flow."""
-        log.info(f"[GROWW] 📡 Exchanging API Key & Secret for Access Token | key={api_key}")
+    def get_access_token(api_key: str, secret: Optional[str] = None, totp: Optional[str] = None) -> str:
+        """Official token generation flow supporting secret or totp."""
+        if totp:
+            log.info(f"[GROWW] 📡 Exchanging TOTP Token & TOTP Code for Access Token | key={api_key}")
+        else:
+            log.info(f"[GROWW] 📡 Exchanging API Key & Secret for Access Token | key={api_key}")
         # Return a simulated token if running under simulated fallback
         return f"GRW_TOKEN_{random.randint(100000, 999999)}"
 
@@ -94,6 +108,7 @@ class GrowwClientWrapper:
         self.auth_error = ""
         self.groww_client_id = groww_client_id
         self.groww_pin = groww_pin
+        self._token_ts = 0.0
         self._init_sdk()
 
     def _init_sdk(self):
@@ -107,17 +122,44 @@ class GrowwClientWrapper:
             import growwapi  # type: ignore
             if client_id and pin:
                 try:
-                    if client_id.startswith("eyJ"):
+                    if client_id.startswith("eyJ") and not pin:
                         # Already a JWT access token! No need to call get_access_token
                         token = client_id
                     else:
-                        # Exchange API Key & API Secret for access token
-                        token = growwapi.GrowwAPI.get_access_token(
-                            api_key=client_id,
-                            secret=pin
-                        )
+                        # Exchange API Key & API Secret (or TOTP Secret) for access token
+                        clean_pin = pin.replace(" ", "").upper()
+                        totp_code = None
+                        if re.match(r'^[A-Z2-7=]{16,64}$', clean_pin):
+                            try:
+                                totp_gen = pyotp.TOTP(clean_pin)
+                                totp_code = totp_gen.now()
+                                log.info("[GROWW] 📡 Detected TOTP Secret. Generating TOTP code dynamically (TOTP Flow)...")
+                            except Exception as e:
+                                log.debug(f"[GROWW] Failed to initialize pyotp generator: {e}")
+
+                        if totp_code:
+                            try:
+                                token = growwapi.GrowwAPI.get_access_token(
+                                    api_key=client_id,
+                                    totp=totp_code
+                                )
+                                log.info("[GROWW] ✅ TOTP Authentication token generated successfully!")
+                            except Exception as totp_err:
+                                log.warning(f"[GROWW] ⚠️ TOTP Flow failed: {totp_err}. Falling back to Secret Flow...")
+                                token = growwapi.GrowwAPI.get_access_token(
+                                    api_key=client_id,
+                                    secret=pin
+                                )
+                        else:
+                            log.info("[GROWW] 📡 Attempting API Key & Secret authentication (Secret Flow)...")
+                            token = growwapi.GrowwAPI.get_access_token(
+                                api_key=client_id,
+                                secret=pin
+                            )
+
                     self._groww = growwapi.GrowwAPI(token)
                     self.authenticated = True
+                    self._token_ts = time.time()
                     log.info("[GROWW] ✅ Successfully authenticated and initialized official growwapi SDK!")
                 except Exception as sdk_err:
                     self.auth_error = str(sdk_err)
@@ -130,24 +172,52 @@ class GrowwClientWrapper:
             # Fallback to simulated/robust private client
             if client_id and pin:
                 self.authenticated = True  # Simulated authentication
-                if client_id.startswith("eyJ"):
+                if client_id.startswith("eyJ") and not pin:
                     token = client_id
                 else:
-                    token = GrowwAPI.get_access_token(
-                        api_key=client_id,
-                        secret=pin
-                    )
+                    clean_pin = pin.replace(" ", "").upper()
+                    totp_code = None
+                    if re.match(r'^[A-Z2-7=]{16,64}$', clean_pin):
+                        try:
+                            totp_gen = pyotp.TOTP(clean_pin)
+                            totp_code = totp_gen.now()
+                        except Exception:
+                            pass
+
+                    if totp_code:
+                        token = GrowwAPI.get_access_token(
+                            api_key=client_id,
+                            totp=totp_code
+                        )
+                    else:
+                        token = GrowwAPI.get_access_token(
+                            api_key=client_id,
+                            secret=pin
+                        )
                 self._groww = GrowwAPI(token)
+                self._token_ts = time.time()
                 log.info(f"[GROWW] 🌱 Initialized simulated Groww Client Wrapper | key={client_id}")
             else:
                 self._groww = GrowwAPI()
                 log.info("[GROWW] ⚠️ Groww Client initialized with empty credentials. Please connect via dashboard.")
+
+    def check_and_refresh_token(self):
+        """Check if token is expired (older than 12 hours) and refresh if using TOTP flow."""
+        if not self.authenticated or not self.groww_pin:
+            return
+            
+        now = time.time()
+        # Refresh if older than 12 hours
+        if now - self._token_ts > 12 * 3600:
+            log.info("[GROWW] 🔄 Access token is older than 12 hours. Refreshing token dynamically...")
+            self._init_sdk()
 
     def _fetch_real_margin(self) -> Optional[Dict]:
         """
         Fetch real margin/balance using the official growwapi SDK.
         The SDK handles auth correctly (API Key → Access Token exchange).
         """
+        self.check_and_refresh_token()
         try:
             # Use the official SDK method (already authenticated in _init_sdk)
             result = self._groww.get_available_margin_details()
@@ -161,7 +231,19 @@ class GrowwClientWrapper:
                 self._margin_nosdk_logged = True
         except Exception as e:
             if not hasattr(self, '_margin_err_logged'):
-                log.warning(f"[GROWW] Error fetching margin: {e}")
+                err_msg = str(e)
+                if "forbidden" in err_msg.lower() or "unregistered" in err_msg.lower() or "ip address" in err_msg.lower():
+                    try:
+                        import requests
+                        public_ip = requests.get("https://api.ipify.org", timeout=5).text.strip()
+                    except Exception:
+                        public_ip = "Unknown"
+                    log.warning(
+                        f"[GROWW] ⚠️ API ACCESS FORBIDDEN / IP RESTRICTION: Please verify your Groww API credentials and register your IP address. "
+                        f"Go to https://groww.in/trade-api/api-keys and register your public IP: {public_ip}"
+                    )
+                else:
+                    log.warning(f"[GROWW] Error fetching margin: {e}")
                 self._margin_err_logged = True
         return None
 
@@ -169,6 +251,7 @@ class GrowwClientWrapper:
         """
         Fetch positions from Groww API (segment FNO).
         """
+        self.check_and_refresh_token()
         if not self.authenticated:
             return {"positions": []}
         try:
@@ -177,7 +260,21 @@ class GrowwClientWrapper:
                 log.info("[GROWW] ✅ Fetched live positions via Groww SDK")
                 return result
         except Exception as e:
-            log.warning(f"[GROWW] Error fetching positions: {e}")
+            err_msg = str(e)
+            if "forbidden" in err_msg.lower() or "unregistered" in err_msg.lower() or "ip address" in err_msg.lower():
+                if not hasattr(self, '_positions_forbidden_logged'):
+                    try:
+                        import requests
+                        public_ip = requests.get("https://api.ipify.org", timeout=5).text.strip()
+                    except Exception:
+                        public_ip = "Unknown"
+                    log.warning(
+                        f"[GROWW] ⚠️ API ACCESS FORBIDDEN / IP RESTRICTION: Please verify your Groww API credentials and register your IP address. "
+                        f"Go to https://groww.in/trade-api/api-keys and register your public IP: {public_ip}"
+                    )
+                    self._positions_forbidden_logged = True
+            else:
+                log.warning(f"[GROWW] Error fetching positions: {e}")
         return {"positions": []}
 
     def get_broker_capital(self) -> Dict[str, float]:
@@ -207,24 +304,44 @@ class GrowwClientWrapper:
         
         if margin_data and isinstance(margin_data, dict):
             try:
-                clear_cash = float(margin_data.get("clear_cash", 0.0))
-                fno = margin_data.get("fno_margin_details", {}) or {}
-                fno_available = float(fno.get("option_buy_balance_available", 0.0))
-                equity = margin_data.get("equity_margin_details", {}) or {}
-                equity_available = float(equity.get("cnc_balance_available", 0.0))
-                collateral = float(margin_data.get("collateral_margin", margin_data.get("collateral", 0.0)))
-                adhoc = float(margin_data.get("adhoc_margin", 0.0))
+                clear_cash_val = margin_data.get("clear_cash")
+                clear_cash = _safe_float(clear_cash_val)
                 
-                available = clear_cash or fno_available or equity_available or float(
-                    margin_data.get("availableBalance", 
-                    margin_data.get("available_balance",
-                    margin_data.get("net_available",
-                    margin_data.get("total_balance", 0.0))))
-                )
+                fno = margin_data.get("fno_margin_details") or {}
+                fno_avail_val = fno.get("option_buy_balance_available") if isinstance(fno, dict) else None
+                fno_available = _safe_float(fno_avail_val)
                 
-                base = float(margin_data.get("sod_limit",
-                    margin_data.get("opening_balance",
-                    margin_data.get("total_collateral", available))))
+                equity = margin_data.get("equity_margin_details") or {}
+                equity_avail_val = equity.get("cnc_balance_available") if isinstance(equity, dict) else None
+                equity_available = _safe_float(equity_avail_val)
+                
+                collateral_val = margin_data.get("collateral_margin")
+                if collateral_val is None:
+                    collateral_val = margin_data.get("collateral")
+                collateral = _safe_float(collateral_val)
+                
+                adhoc_val = margin_data.get("adhoc_margin")
+                adhoc = _safe_float(adhoc_val)
+                
+                # Resolve available balance safely
+                available_val = margin_data.get("availableBalance")
+                if available_val is None:
+                    available_val = margin_data.get("available_balance")
+                if available_val is None:
+                    available_val = margin_data.get("net_available")
+                if available_val is None:
+                    available_val = margin_data.get("total_balance")
+                
+                available = clear_cash or fno_available or equity_available or _safe_float(available_val)
+                
+                # Resolve base balance safely
+                base_val = margin_data.get("sod_limit")
+                if base_val is None:
+                    base_val = margin_data.get("opening_balance")
+                if base_val is None:
+                    base_val = margin_data.get("total_collateral")
+                
+                base = _safe_float(base_val) if base_val is not None else available
                 
                 result = {
                     "available": available,

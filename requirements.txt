@@ -1,8 +1,7 @@
-# requirements.txt — Dhan Options Paper Trader
+# requirements.txt — Groww Options Paper Trader
 # Install: pip install -r requirements.txt
 
 # Core
-dhanhq>=2.0.0           # Dhan HQ official Python SDK
 pandas>=2.0.0
 numpy>=1.24.0
 python-dateutil>=2.8.2
@@ -16,8 +15,8 @@ webdriver-manager>=4.0.1
 
 # Optional but recommended
 pytz>=2023.3            # Timezone handling
-requests>=2.31.0        # Used internally by dhanhq
-websocket-client>=1.6.0 # For Dhan live feed (if needed later)
+requests>=2.31.0        # Used internally
+
 
 # Monitoring / Alerting (optional)
 # python-telegram-bot>=20.0   # Telegram trade alerts
@@ -26,4 +25,5 @@ websocket-client>=1.6.0 # For Dhan live feed (if needed later)
 # Production Web Servers
 gunicorn>=21.2.0              # Linux production WSGI server
 waitress>=3.0.0              # Windows production WSGI server
+pyotp>=2.9.0                  # TOTP generation for Groww API
 

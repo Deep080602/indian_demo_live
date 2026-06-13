@@ -44,7 +44,6 @@ from alerts import alert_entry, alert_win, alert_loss, alert_target_hit, alert_d
 from flask import Flask, jsonify, request, session, redirect, url_for
 from config import INDEX_CONFIG, CAPITAL_PER_INDEX, cfg
 from smart_filter import smart_filter
-from dhan_live import place_dhan_order, place_dhan_super_order, cancel_dhan_super_order
 from groww_live import place_groww_order
 from expiry_manager import ExpiryManager
 import db_helper
@@ -150,12 +149,39 @@ _active_broker = "GROWW"
 def _get_capital_file() -> str:
     return os.path.join(LOG_DIR, "capital_live.json" if _live_trading else "capital.json")
 
-def _get_trades_file() -> str:
-    return os.path.join(LOG_DIR, "trades_live.csv" if _live_trading else "trades.csv")
+
+def _get_or_create_flask_secret_key() -> str:
+    key = os.environ.get("FLASK_SECRET_KEY")
+    if key:
+        return key
+    
+    # Try reading from a local file to persist sessions across server restarts
+    secret_key_path = os.path.join(LOG_DIR, ".flask_secret_key")
+    if os.path.exists(secret_key_path):
+        try:
+            with open(secret_key_path, "r", encoding="utf-8") as f:
+                saved_key = f.read().strip()
+                if saved_key:
+                    return saved_key
+        except Exception as e:
+            log.warning(f"[SECURITY] Failed to read saved session key: {e}")
+            
+    # Generate a new cryptographically secure key
+    import secrets
+    new_key = secrets.token_hex(32)
+    try:
+        with open(secret_key_path, "w", encoding="utf-8") as f:
+            f.write(new_key)
+        log.info("[SECURITY] Generated and saved a new secure Flask secret key.")
+    except Exception as e:
+        log.warning(f"[SECURITY] Failed to save generated session key: {e}")
+    return new_key
 
 # ─── DASHBOARD ─────────────────────────────────────────────────────────────────
 _dashboard_app = Flask(__name__)
-_dashboard_app.secret_key = os.environ.get("FLASK_SECRET_KEY", "algo_trading_super_secret_key_123")
+_dashboard_app.secret_key = _get_or_create_flask_secret_key()
+_dashboard_app.config['SESSION_COOKIE_HTTPONLY'] = True
+_dashboard_app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 _dashboard_thread: Optional[threading.Thread] = None
 active_books: Dict[int, 'Book'] = {}
 
@@ -190,73 +216,6 @@ def _get_cached_vix() -> float:
     if ts is None or (datetime.now() - ts).total_seconds() > 60:
         threading.Thread(target=_refresh_vix_cache, daemon=True).start()
     return val
-
-def _read_dashboard_data():
-    """Gather dashboard data from logs and trades."""
-    path = _get_trades_file()
-    trades = []
-    try:
-        if os.path.exists(path):
-            with open(path, encoding="utf-8-sig", errors="replace") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    try:
-                        tid = row.get("TradeID", "")
-                        idx = row.get("Index", "NIFTY")
-                        contracts = int(row.get("Contracts", 0) or 0)
-                        entry_px = float(row.get("EntryPrice", 0) or 0)
-                        exit_px = float(row.get("ExitPrice", 0) or 0)
-                        total_charges = float(row.get("Charges", 0) or 0)
-                        
-                        # Read breakdown if present in CSV columns
-                        brokerage = float(row.get("Brokerage") or 0) if "Brokerage" in row else 0.0
-                        gst = float(row.get("GST") or 0) if "GST" in row else 0.0
-                        stt = float(row.get("STT") or 0) if "STT" in row else 0.0
-                        stamp_duty = float(row.get("StampDuty") or 0) if "StampDuty" in row else 0.0
-                        exchange_charges = float(row.get("ExchangeCharges") or 0) if "ExchangeCharges" in row else 0.0
-                        sebi_fee = float(row.get("SEBIFee") or 0) if "SEBIFee" in row else 0.0
-                        
-                        # On-the-fly fallback calculation for legacy trades
-                        if (gst == 0.0 or stt == 0.0 or exchange_charges == 0.0) and contracts > 0 and entry_px > 0 and exit_px > 0:
-                            entry_bd = calculate_charges_breakdown(entry_px, contracts, is_buy=True, index=idx)
-                            exit_bd = calculate_charges_breakdown(exit_px, contracts, is_buy=False, index=idx)
-                            
-                            brokerage = round(entry_bd["brokerage"] + exit_bd["brokerage"], 2)
-                            gst = round(entry_bd["gst"] + exit_bd["gst"], 2)
-                            stt = round(entry_bd["stt"] + exit_bd["stt"], 2)
-                            stamp_duty = round(entry_bd["stamp_duty"] + exit_bd["stamp_duty"], 2)
-                            exchange_charges = round(entry_bd["exchange_charges"] + exit_bd["exchange_charges"], 2)
-                            sebi_fee = round(entry_bd["sebi_fee"] + exit_bd["sebi_fee"], 2)
-                            total_charges = round(entry_bd["total"] + exit_bd["total"], 2)
-                            
-                        trades.append({
-                            "tid": tid,
-                            "date": row.get("Date", ""),
-                            "entry_time": row.get("EntryTime", ""),
-                            "exit_time": row.get("ExitTime", ""),
-                            "direction": row.get("Direction", ""),
-                            "strike": row.get("Strike", ""),
-                            "opt": row.get("OptType", ""),
-                            "entry": entry_px,
-                            "exit": exit_px,
-                            "sl": float(row.get("SL", 0) or 0),
-                            "tp": float(row.get("TP", 0) or 0),
-                            "pnl": float(row.get("PnL_Rs", 0) or 0),
-                            "pnl_pct": float(row.get("PnL_Pct", 0) or 0),
-                            "reason": row.get("ExitReason", ""),
-                            "charges": total_charges,
-                            "brokerage": brokerage,
-                            "gst": gst,
-                            "stt": stt,
-                            "stamp_duty": stamp_duty,
-                            "exchange_charges": exchange_charges,
-                            "sebi_fee": sebi_fee,
-                        })
-                    except:
-                        pass
-    except:
-        pass
-    return trades
 
 def _read_log_data(username: str, n=60):
     """Read trading log file and filter by username or global system events."""
@@ -313,24 +272,8 @@ def check_and_clear_expired_credentials():
                 env_vars.pop("GROWW_CREDENTIALS_TIMESTAMP", None)
                 env_changed = True
         
-        # Dhan Expiration Check (24 hours)
-        dhan_ts_str = env_vars.get("DHAN_CREDENTIALS_TIMESTAMP", "")
-        if dhan_ts_str:
-            try:
-                save_time = datetime.fromisoformat(dhan_ts_str)
-                if (now - save_time).total_seconds() >= 86400:
-                    log.warning("[SECURITY] 🔐 Dhan API credentials are older than 24 hours. Expiring and clearing...")
-                    cfg.client_id = ""
-                    cfg.access_token = ""
-                    env_vars.pop("DHAN_CLIENT_ID", None)
-                    env_vars.pop("DHAN_ACCESS_TOKEN", None)
-                    env_vars.pop("DHAN_CREDENTIALS_TIMESTAMP", None)
-                    env_changed = True
-            except Exception:
-                env_vars.pop("DHAN_CLIENT_ID", None)
-                env_vars.pop("DHAN_ACCESS_TOKEN", None)
-                env_vars.pop("DHAN_CREDENTIALS_TIMESTAMP", None)
-                env_changed = True
+        # Dhan Expiration Check skipped (Groww only active broker)
+        pass
                 
         if env_changed:
             new_lines = []
@@ -392,13 +335,6 @@ def login_required(f):
     def decorated_function(*args, **kwargs):
         if "user_id" in session:
             return f(*args, **kwargs)
-        # Fallback for API and mobile clients using username query param or header
-        u_header = request.headers.get("X-Username") or request.args.get("username")
-        if u_header:
-            uid = db_helper.get_user_id_by_username(u_header)
-            if uid != -1:
-                session["user_id"] = uid
-                return f(*args, **kwargs)
         return jsonify({"status": "error", "message": "Authentication required"}), 401
     return decorated_function
 
@@ -411,6 +347,8 @@ def api_register():
         return jsonify({"status": "error", "message": "Username and password are required"}), 400
     if len(username) < 3 or len(password) < 4:
         return jsonify({"status": "error", "message": "Invalid username (min 3 chars) or password (min 4 chars)"}), 400
+    if not re.match(r"^[a-zA-Z0-9_\-\.]{3,30}$", username):
+        return jsonify({"status": "error", "message": "Username must be 3-30 characters and only contain alphanumeric, underscores, dots, or hyphens"}), 400
     
     success = db_helper.register_user(username, password)
     if success:
@@ -431,6 +369,12 @@ def api_login():
         session["user_id"] = user_id
         session.permanent = True
         log.info(f"[AUTH] User '{username}' (ID: {user_id}) logged in successfully.")
+        
+        # Enforce DEMO mode upon login
+        db_helper.update_user_config(user_id, {"live_trading": 0})
+        global active_books
+        active_books[user_id] = Book(user_id)
+        
         return jsonify({"status": "success", "message": "Logged in successfully", "user_id": user_id})
     else:
         return jsonify({"status": "error", "message": "Invalid username or password"}), 401
@@ -465,6 +409,7 @@ def api_vix_refresh():
 @login_required
 def api_data():
     user_id = session["user_id"]
+    is_admin = db_helper.is_admin_user(user_id)
     u_config = db_helper.get_user_config(user_id)
     if not u_config:
         return jsonify({"status": "error", "message": "Configuration not found"}), 404
@@ -476,6 +421,13 @@ def api_data():
     trading_indices = [x.strip().upper() for x in u_config.get("trading_indices", "NIFTY,SENSEX").split(",") if x.strip()]
     
     book = get_user_book(user_id)
+    
+    # Throttle database write of last_login_at to once every 5 minutes (300 seconds) to avoid spamming the DB during dashboard polling
+    now_time = time.time()
+    if now_time - getattr(book, 'last_active_update', 0.0) > 300:
+        db_helper.update_user_active(user_id)
+        book.last_active_update = now_time
+        
     current_vix = _get_cached_vix()
     
     if live_trading and book is not None:
@@ -501,10 +453,10 @@ def api_data():
     open_positions = []
     unrealized_pnl = 0.0
     for idx in list(book.open.keys()):
-        for tid, p in book.open[idx].items():
+        for tid, p in list(book.open[idx].items()):
                 real_ltp = 0.0
                 if live_trading:
-                    real_ltp = _get_live_position_ltp(p, client=book.groww_client if p.broker == "GROWW" else book.dhan_client, live_trading=live_trading)
+                    real_ltp = _get_live_position_ltp(p, client=book.groww_client, live_trading=live_trading)
                 if real_ltp <= 0:
                     real_ltp = _get_nse_ltp(p.strike, p.opt, idx)
                 if real_ltp > 0:
@@ -563,24 +515,7 @@ def api_data():
     current_capital = realized_capital + unrealized_pnl
 
     if live_trading:
-        if active_broker == "DHAN" and book.dhan_client:
-            try:
-                broker_cap = book.dhan_client.get_broker_capital()
-                if broker_cap["available"] > 0:
-                    available_bal = broker_cap["available"]
-                    open_val = 0.0
-                    for idx in list(book.open.keys()):
-                        for tid, p in book.open[idx].items():
-                            if p.broker == "DHAN":
-                                open_val += p.cur * p.contracts
-                    current_capital = available_bal + open_val
-                    base = broker_cap["base"] if broker_cap["base"] > 0 else current_capital
-                    realized_capital = current_capital - unrealized_pnl
-                    realized_pnl = realized_capital - base
-                    total_pnl = current_capital - base
-            except Exception as e:
-                log.error(f"[DASHBOARD] Failed to fetch live Dhan capital: {e}")
-        elif active_broker == "GROWW" and book.groww_client:
+        if active_broker == "GROWW" and book.groww_client:
             try:
                 groww_cap = book.groww_client.get_broker_capital()
                 available_bal = groww_cap.get("available", 0.0)
@@ -637,7 +572,7 @@ def api_data():
         cum += t["pnl"]
         equity.append(round(cum, 2))
 
-    return jsonify({
+    response_data = {
         "trades": trades,
         "open_positions": open_positions,
         "equity": equity,
@@ -671,9 +606,10 @@ def api_data():
         "nifty_spot": _get_nse_spot("NIFTY"),
         "sensex_spot": _get_nse_spot("SENSEX"),
         "vix": current_vix,
+        "ai_brain": book.ai_brain.get_metrics() if hasattr(book, 'ai_brain') else {"trained": False, "accuracy": 0.0, "samples": 0},
         "dhan_credentials": {
-            "client_id": u_config.get("dhan_client_id", ""),
-            "has_token": bool(u_config.get("dhan_access_token"))
+            "client_id": "",
+            "has_token": False
         },
         "groww_credentials": {
             "client_id": u_config.get("groww_client_id", ""),
@@ -681,13 +617,20 @@ def api_data():
         },
         "groww_balance": _get_groww_balance_details(client=book.groww_client) if (live_trading and active_broker == "GROWW") else None,
         "trailing_sl_enabled": bool(u_config.get("trailing_sl_enabled", 1)),
-        "smart_filter_enabled": bool(u_config.get("smart_filter_enabled", 1)),
-    })
+        "smart_filter_enabled": bool(u_config.get("smart_filter_enabled", 1)) if is_admin else False,
+        "ai_brain_enabled": bool(u_config.get("ai_brain_enabled", 1)) if is_admin else False,
+        "is_admin": is_admin
+    }
+    if is_admin:
+        response_data["users_list"] = db_helper.get_all_users()
+    return jsonify(response_data)
 
 @_dashboard_app.route("/api/smart_filter/toggle", methods=["POST"])
 @login_required
 def api_smart_filter_toggle():
     user_id = session["user_id"]
+    if not db_helper.is_admin_user(user_id):
+        return jsonify({"status": "error", "message": "Admin privileges required"}), 403
     data = request.json or {}
     enabled = bool(data.get("enabled", True))
     db_helper.update_user_config(user_id, {"smart_filter_enabled": 1 if enabled else 0})
@@ -703,6 +646,106 @@ def api_smart_filter_toggle():
             
     log.info(f"[Guard] 🛡️ [{book.username}] Dynamic toggle: Smart Trade Guard is now {'ENABLED' if enabled else 'DISABLED'}")
     return jsonify({"status": "success", "enabled": enabled, "message": f"Smart Trade Guard is now {'enabled' if enabled else 'disabled'}."})
+
+@_dashboard_app.route("/api/ai_brain/toggle", methods=["POST"])
+@login_required
+def api_ai_brain_toggle():
+    user_id = session["user_id"]
+    if not db_helper.is_admin_user(user_id):
+        return jsonify({"status": "error", "message": "Admin privileges required"}), 403
+    data = request.json or {}
+    enabled = bool(data.get("enabled", True))
+    db_helper.update_user_config(user_id, {"ai_brain_enabled": 1 if enabled else 0})
+    
+    book = get_user_book(user_id)
+    book.ai_brain_enabled = enabled
+        
+    if enabled and hasattr(book, "ai_brain"):
+        try:
+            book.ai_brain.train_brain()
+        except Exception as e:
+            log.warning(f"[AI] Error training brain: {e}")
+            
+    log.info(f"[AI] 🧠 [{book.username}] Dynamic toggle: AI Brain is now {'ENABLED' if enabled else 'DISABLED'}")
+    return jsonify({"status": "success", "enabled": enabled, "message": f"AI Brain is now {'enabled' if enabled else 'disabled'}."})
+
+@_dashboard_app.route("/api/admin/users/delete", methods=["POST"])
+@login_required
+def api_admin_delete_user():
+    admin_id = session["user_id"]
+    if not db_helper.is_admin_user(admin_id):
+        return jsonify({"status": "error", "message": "Admin privileges required"}), 403
+    
+    data = request.json or {}
+    target_user_id = data.get("user_id")
+    if not target_user_id:
+        return jsonify({"status": "error", "message": "User ID is required"}), 400
+        
+    if int(target_user_id) == admin_id:
+        return jsonify({"status": "error", "message": "Cannot delete your own admin account"}), 400
+        
+    success = db_helper.delete_user(target_user_id)
+    if success:
+        # Remove book if loaded
+        global active_books
+        active_books.pop(int(target_user_id), None)
+        return jsonify({"status": "success", "message": "User deleted successfully"})
+    return jsonify({"status": "error", "message": "Failed to delete user"}), 500
+
+@_dashboard_app.route("/api/admin/users/modify", methods=["POST"])
+@login_required
+def api_admin_modify_user():
+    admin_id = session["user_id"]
+    if not db_helper.is_admin_user(admin_id):
+        return jsonify({"status": "error", "message": "Admin privileges required"}), 403
+    
+    data = request.json or {}
+    target_user_id = data.get("user_id")
+    new_username = data.get("username", "").strip()
+    new_password = data.get("password", "").strip()
+    new_role = data.get("is_admin") # None if not specified
+    
+    if not target_user_id:
+        return jsonify({"status": "error", "message": "User ID is required"}), 400
+        
+    if new_username:
+        if not re.match(r"^[a-zA-Z0-9_\-\.]{3,30}$", new_username):
+            return jsonify({"status": "error", "message": "Username must be 3-30 characters and only contain alphanumeric, underscores, dots, or hyphens"}), 400
+            
+    # Check if they are trying to strip their own admin privileges
+    if int(target_user_id) == admin_id and new_role is not None and not new_role:
+        return jsonify({"status": "error", "message": "Cannot remove your own admin role"}), 400
+        
+    success = db_helper.modify_user(target_user_id, new_username, new_password, new_role)
+    if success:
+        return jsonify({"status": "success", "message": "User modified successfully"})
+    return jsonify({"status": "error", "message": "Failed to modify user (username might already exist)"}), 400
+
+@_dashboard_app.route("/api/admin/users/toggle_trading", methods=["POST"])
+@login_required
+def api_admin_toggle_trading():
+    admin_id = session["user_id"]
+    if not db_helper.is_admin_user(admin_id):
+        return jsonify({"status": "error", "message": "Admin privileges required"}), 403
+    
+    data = request.json or {}
+    target_user_id = data.get("user_id")
+    active = data.get("trading_active") # 1 or 0
+    
+    if not target_user_id or active is None:
+        return jsonify({"status": "error", "message": "User ID and trading_active status are required"}), 400
+        
+    # Update user config in DB
+    db_helper.update_user_config(target_user_id, {"trading_active": int(active)})
+    
+    # Update active book in memory if loaded
+    book = active_books.get(int(target_user_id))
+    if book:
+        book.trading_active = bool(active)
+        
+    action_name = "started" if active else "stopped"
+    log.info(f"[MAIN] [Admin Control] User {target_user_id} trading loop has been {action_name} by Admin.")
+    return jsonify({"status": "success", "message": f"Trading loop {action_name} successfully for user ID {target_user_id}."})
 
 @_dashboard_app.route("/api/trailing_sl/toggle", methods=["POST"])
 @login_required
@@ -724,13 +767,13 @@ def api_broker():
     user_id = session["user_id"]
     data = request.json or {}
     target_broker = data.get("broker", "GROWW").upper()
-    if target_broker in ("GROWW", "DHAN"):
+    if target_broker == "GROWW":
         db_helper.update_user_config(user_id, {"active_broker": target_broker})
         book = get_user_book(user_id)
         book.active_broker = target_broker
         log.info(f"[MAIN] 🔌 [{book.username}] Switched active broker to {target_broker}")
         return jsonify({"status": "success", "message": f"Successfully switched active broker to {target_broker}."})
-    return jsonify({"status": "error", "message": "Unsupported broker. Choose GROWW or DHAN."}), 400
+    return jsonify({"status": "error", "message": "Unsupported broker. Only GROWW is supported."}), 400
 
 @_dashboard_app.route("/api/broker/credentials", methods=["POST"])
 @login_required
@@ -741,79 +784,48 @@ def api_broker_credentials():
         return jsonify({"status": "error", "message": "Configuration not found"}), 404
         
     data = request.json or {}
-    broker = data.get("broker", "DHAN").upper()
+    broker = data.get("broker", "GROWW").upper()
     client_id = data.get("client_id", "").strip()
     access_token = data.get("access_token", "").strip()
     
+    if broker != "GROWW":
+        return jsonify({"status": "error", "message": "Only GROWW broker is supported."}), 400
+
     if not client_id:
         return jsonify({"status": "error", "message": "Client ID is required."}), 400
         
-    if broker == "DHAN":
-        if access_token == "REUSE_SAVED_TOKEN":
-            access_token = u_config.get("dhan_access_token", "")
-            if not access_token:
-                return jsonify({"status": "error", "message": "No saved Access Token found. Please enter one."}), 400
-        elif not access_token:
-            return jsonify({"status": "error", "message": "Access Token is required."}), 400
-            
-        try:
-            from dhan_client import DhanClient
-            test_client = DhanClient(client_id=client_id, access_token=access_token)
-            funds = test_client.get_broker_capital()
-            if funds["available"] == 0.0 and funds["base"] == 0.0:
-                log.error(f"[DHAN] [{u_config['username']}] Connected but limits are 0. Verification failed.")
-                return jsonify({"status": "error", "message": "Dhan connection failed. Please verify your Client ID and Access Token."}), 400
-        except Exception as e:
-            log.error(f"[API] [{u_config['username']}] Error testing Dhan client: {e}")
-            return jsonify({"status": "error", "message": f"Dhan API connection failed: {e}"}), 400
-            
-        db_helper.update_user_config(user_id, {
-            "dhan_client_id": client_id,
-            "dhan_access_token": access_token
-        })
+    if access_token == "REUSE_SAVED_TOKEN":
+        access_token = u_config.get("groww_pin", "")
+        if not access_token:
+            return jsonify({"status": "error", "message": "No saved Trading PIN found. Please enter one."}), 400
+    elif not access_token:
+        return jsonify({"status": "error", "message": "Trading PIN is required."}), 400
         
-    else:
-        # GROWW
-        if access_token == "REUSE_SAVED_TOKEN":
-            access_token = u_config.get("groww_pin", "")
-            if not access_token:
-                return jsonify({"status": "error", "message": "No saved Trading PIN found. Please enter one."}), 400
-        elif not access_token:
-            return jsonify({"status": "error", "message": "Trading PIN is required."}), 400
-            
-        try:
-            from groww_client import GrowwClientWrapper
-            test_client = GrowwClientWrapper(groww_client_id=client_id, groww_pin=access_token)
-            funds = test_client.get_broker_capital()
-            if not test_client.authenticated:
-                log.error(f"[GROWW] [{u_config['username']}] Authentication is inactive. Verification failed.")
-                error_msg = getattr(test_client, "auth_error", "Authentication failed. Please check your credentials.")
-                return jsonify({"status": "error", "message": f"Groww connection failed: {error_msg}"}), 400
-        except Exception as e:
-            log.error(f"[API] [{u_config['username']}] Error testing Groww client: {e}")
-            return jsonify({"status": "error", "message": f"Groww API connection failed: {e}"}), 400
-            
-        db_helper.update_user_config(user_id, {
-            "groww_client_id": client_id,
-            "groww_pin": access_token
-        })
+    try:
+        from groww_client import GrowwClientWrapper
+        test_client = GrowwClientWrapper(groww_client_id=client_id, groww_pin=access_token)
+        funds = test_client.get_broker_capital()
+        if not test_client.authenticated:
+            log.error(f"[GROWW] [{u_config['username']}] Authentication is inactive. Verification failed.")
+            error_msg = getattr(test_client, "auth_error", "Authentication failed. Please check your credentials.")
+            return jsonify({"status": "error", "message": f"Groww connection failed: {error_msg}"}), 400
+    except Exception as e:
+        log.error(f"[API] [{u_config['username']}] Error testing Groww client: {e}")
+        return jsonify({"status": "error", "message": f"Groww API connection failed: {e}"}), 400
+        
+    db_helper.update_user_config(user_id, {
+        "groww_client_id": client_id,
+        "groww_pin": access_token
+    })
         
     if user_id in active_books:
         del active_books[user_id]
     book = get_user_book(user_id)
     
     balance_msg = ""
-    if broker == "GROWW" and book.groww_client:
+    if book.groww_client:
         try:
             caps = book.groww_client.get_broker_capital()
-            avail_bal = caps.get("available", 0.0)
-            if avail_bal > 0:
-                balance_msg = f" | Available Balance: ₹{avail_bal:,.2f}"
-        except:
-            pass
-    elif broker == "DHAN" and book.dhan_client:
-        try:
-            caps = book.dhan_client.get_broker_capital()
             avail_bal = caps.get("available", 0.0)
             if avail_bal > 0:
                 balance_msg = f" | Available Balance: ₹{avail_bal:,.2f}"
@@ -828,7 +840,7 @@ def api_broker_credentials():
             
     return jsonify({
         "status": "success", 
-        "message": f"{broker} credentials successfully connected and saved!{balance_msg}"
+        "message": f"GROWW credentials successfully connected and saved!{balance_msg}"
     })
 
 @_dashboard_app.route("/api/capital/update", methods=["POST"])
@@ -870,9 +882,7 @@ def api_mode():
                 if not p.dhan_order_id or p.broker == "MOCK" or p.dhan_order_id.startswith("MOCK"):
                     log.info(f"[MODE SWITCH] 🔄 [{book.username}] Carry-over: Punching active demo position {p.tid} ({p.strike} {p.opt}) to live broker...")
                     sec_id = ""
-                    if book.active_broker == "DHAN" and book.dhan_client:
-                        sec_id = _get_dhan_sec_id(p.index, p.strike, p.opt, p.expiry, client=book.dhan_client)
-                    elif book.active_broker == "GROWW" and book.groww_client:
+                    if book.active_broker == "GROWW" and book.groww_client:
                         sec_id = _get_groww_contract_symbol(p.index, p.strike, p.opt)
                         if not sec_id:
                             sec_id = f"GRW_SEC_{int(p.strike)}_{p.opt}"
@@ -882,9 +892,7 @@ def api_mode():
                         
                     live_order_id = ""
                     try:
-                        if book.active_broker == "DHAN":
-                            live_order_id = place_dhan_order(sec_id, "BUY", p.contracts, p.index, client=book.dhan_client)
-                        elif book.active_broker == "GROWW":
+                        if book.active_broker == "GROWW":
                             live_order_id = place_groww_order(sec_id, "BUY", p.contracts, p.index, client=book.groww_client)
                     except Exception as punch_err:
                         log.error(f"[MODE SWITCH] ❌ [{book.username}] Exception punching order for {p.tid}: {punch_err}")
@@ -951,6 +959,12 @@ def api_reset():
     except Exception as ex:
         log.warning(f"[Guard] Error resetting smart filter stats: {ex}")
         
+    if getattr(book, "ai_brain_enabled", True) and hasattr(book, "ai_brain"):
+        try:
+            book.ai_brain.train_brain()
+        except Exception as e:
+            log.error(f"[AI] Error retraining brain on reset: {e}")
+
     log.info(f"[MAIN] [{username}] Trade log and statistics reset by user via dashboard")
     return jsonify({"status": "success", "message": "Trade logs, logs, and capital have been fully reset."})
 
@@ -991,7 +1005,7 @@ def api_trades_download():
             t.get("charges", ""),
             t.get("pnl", ""),
             t.get("exit_reason", ""),
-            t.get("broker", ""),
+            "DEMO" if not t.get("is_live") else t.get("broker", "GROWW"),
             t.get("brokerage", ""),
             t.get("gst", ""),
             t.get("stt", ""),
@@ -1115,7 +1129,7 @@ def api_position_squareoff():
             p = book.open[index][tid]
             real_ltp = 0.0
             if book.live_trading:
-                real_ltp = _get_live_position_ltp(p, client=book.groww_client if p.broker == "GROWW" else book.dhan_client, live_trading=book.live_trading)
+                real_ltp = _get_live_position_ltp(p, client=book.groww_client if p.broker == "GROWW" else None, live_trading=book.live_trading)
             if real_ltp <= 0:
                 real_ltp = _get_nse_ltp(p.strike, p.opt, index)
             ltp = real_ltp if real_ltp > 0 else p.cur
@@ -1124,6 +1138,213 @@ def api_position_squareoff():
             return jsonify({"status": "success", "message": f"Position {tid} successfully squared off."})
                 
     return jsonify({"status": "error", "message": "Position not found."}), 404
+
+@_dashboard_app.route("/api/option_chain/<index>")
+@login_required
+def api_option_chain(index):
+    index = index.upper()
+    if index not in INDEX_CONFIG:
+        return jsonify({"status": "error", "message": f"Unsupported index: {index}"}), 400
+    
+    # Fetch option chain
+    chain = _fetch_nse_chain(index)
+    if not chain or not chain.get("records"):
+        return jsonify({"status": "error", "message": f"Failed to fetch option chain for {index}"}), 500
+    
+    spot = chain.get("spot", 0.0)
+    records = chain.get("records", [])
+    
+    # Find closest strike to spot (ATM strike)
+    closest_record_idx = min(range(len(records)), key=lambda i: abs(records[i]["strike"] - spot))
+    
+    # Slice +/- 5 strikes
+    start_idx = max(0, closest_record_idx - 5)
+    end_idx = min(len(records), closest_record_idx + 6) # slice is exclusive of end index
+    sliced_records = records[start_idx:end_idx]
+    
+    # Get user Book for risk pct parameters
+    user_id = session["user_id"]
+    book = get_user_book(user_id)
+    sl_pct = getattr(book, "sl_on_premium_pct", 0.05)
+    tp_pct = getattr(book, "tp_on_premium_pct", 0.15)
+    
+    # Prepare result
+    result_records = []
+    for r in sliced_records:
+        strike = r["strike"]
+        ce_ltp = r["ce_ltp"]
+        pe_ltp = r["pe_ltp"]
+        
+        # Auto-calculated SL and TP
+        ce_sl = round(ce_ltp * (1 - sl_pct), 2) if ce_ltp > 0 else 0.0
+        ce_tp = round(ce_ltp * (1 + tp_pct), 2) if ce_ltp > 0 else 0.0
+        
+        pe_sl = round(pe_ltp * (1 - sl_pct), 2) if pe_ltp > 0 else 0.0
+        pe_tp = round(pe_ltp * (1 + tp_pct), 2) if pe_ltp > 0 else 0.0
+        
+        result_records.append({
+            "strike": strike,
+            "ce_ltp": ce_ltp,
+            "pe_ltp": pe_ltp,
+            "ce_sl": ce_sl,
+            "ce_tp": ce_tp,
+            "pe_sl": pe_sl,
+            "pe_tp": pe_tp,
+            "ce_symbol": r.get("ce_symbol"),
+            "pe_symbol": r.get("pe_symbol")
+        })
+        
+    expiry = ExpiryManager(index).get_expiry()
+    
+    return jsonify({
+        "status": "success",
+        "index": index,
+        "spot": spot,
+        "expiry": expiry,
+        "records": result_records,
+        "lot_size": INDEX_CONFIG[index]["lot_size"],
+        "sl_pct": sl_pct,
+        "tp_pct": tp_pct
+    })
+
+@_dashboard_app.route("/api/manual_trade/place", methods=["POST"])
+@login_required
+def api_place_manual_trade():
+    try:
+        user_id = session["user_id"]
+        book = get_user_book(user_id)
+        
+        data = request.json or {}
+        index = data.get("index")
+        strike = data.get("strike")
+        opt = data.get("opt") # "CE" or "PE"
+        entry = data.get("entry") # float LTP
+        sl = data.get("sl") # float SL
+        tp = data.get("tp") # float TP
+        lots = data.get("lots") # int lots
+        
+        if not index or strike is None or not opt or entry is None or sl is None or tp is None or lots is None:
+            return jsonify({"status": "error", "message": "Missing required parameters"}), 400
+        
+        index = index.upper()
+        if index not in INDEX_CONFIG:
+            return jsonify({"status": "error", "message": f"Unsupported index: {index}"}), 400
+            
+        opt = opt.upper()
+        if opt not in ("CE", "PE"):
+            return jsonify({"status": "error", "message": "Option type must be CE or PE"}), 400
+            
+        strike = float(strike)
+        entry = float(entry)
+        sl = float(sl)
+        tp = float(tp)
+        lots = int(lots)
+        
+        if lots <= 0:
+            return jsonify({"status": "error", "message": "Lots must be greater than 0"}), 400
+            
+        if len(book.open[index]) >= book.max_open_per_index:
+            return jsonify({"status": "error", "message": f"Max open positions ({book.max_open_per_index}) reached for {index}"}), 400
+            
+        lot_size = INDEX_CONFIG[index]["lot_size"]
+        contracts = int(lots * lot_size)
+        
+        # Determine expiry date
+        expiry = ExpiryManager(index).get_expiry()
+        
+        # Place live order if live trading is active, else create mock order ID
+        dhan_order_id = ""
+        dhan_sec_id = ""
+        broker_name = "GROWW"
+        is_super = False
+        
+        if book.live_trading:
+            broker_name = book.active_broker
+            resolved = _get_groww_contract_symbol(index, strike, opt)
+            if resolved:
+                sec_id = resolved
+            else:
+                sec_id = f"GRW_SEC_{int(strike)}_{opt}"
+            
+            # Place live order
+            dhan_order_id = place_groww_order(sec_id, "BUY", contracts, index, client=book.groww_client)
+                
+            if not dhan_order_id:
+                return jsonify({"status": "error", "message": "Live order placement failed"}), 500
+            dhan_sec_id = sec_id
+            
+        # Create position object
+        book._n += 1
+        display_index = index
+        tid = f"MANUAL_{display_index}_{_now().strftime('%Y%m%d_%H%M%S')}_{book._n:03d}"
+        
+        entry_bd = calculate_charges_breakdown(entry, contracts, is_buy=True, index=index)
+        spot_val = _get_nse_spot(index) or entry
+        client_id_val = book.groww_client_id if book.live_trading else ""
+
+        p = Pos(
+            tid=tid, index=index, user_id=user_id, client_id=client_id_val, is_open=True, direction="CALL" if opt == "CE" else "PUT",
+            strike=strike, opt=opt, expiry=expiry,
+            lots=lots, contracts=contracts,
+            entry=entry, sl=sl, tp=tp,
+            entry_time=_now(), entry_spot=spot_val,
+            e9_15=0.0, e21_15=0.0,
+            cur=entry, peak=entry,
+            dhan_order_id=dhan_order_id, dhan_sec_id=dhan_sec_id,
+            broker=broker_name,
+            entry_charges=entry_bd["total"],
+            charges=entry_bd["total"],
+            brokerage=entry_bd["brokerage"],
+            gst=entry_bd["gst"],
+            stt=entry_bd["stt"],
+            stamp_duty=entry_bd["stamp_duty"],
+            exchange_charges=entry_bd["exchange_charges"],
+            sebi_fee=entry_bd["sebi_fee"],
+            vix=_get_cached_vix(),
+            atr_pct=0.005,
+            guard_status="Manual",
+            predicted_win_prob=100.0,
+            is_super_order=is_super,
+            trailing_sl_enabled=book.trailing_sl_enabled,
+            is_live=book.live_trading
+        )
+        
+        book.open[index][tid] = p
+        book.day_trades[index] += 1
+        
+        # Save position to DB
+        db_helper.save_position(user_id, p)
+        
+        log.info(f"\n{'='*55}")
+        log.info(f"  MANUAL OPEN  {tid} | User: {book.username}")
+        log.info(f"  {display_index} {int(strike)}{opt} | BUY")
+        log.info(f"  Entry=Rs.{entry} | SL=Rs.{sl} | TP=Rs.{tp}")
+        log.info(f"{'='*55}\n")
+        
+        alert_entry(
+            "BUY", strike, entry, sl, tp, 
+            index=index, lots=lots, contracts=contracts,
+            guard_status="Manual", predicted_win_prob=100.0
+        )
+        
+        return jsonify({
+            "status": "success",
+            "message": "Manual position opened successfully",
+            "position": {
+                "tid": tid,
+                "index": index,
+                "strike": strike,
+                "opt": opt,
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "lots": lots,
+                "contracts": contracts
+            }
+        })
+    except Exception as e:
+        log.error(f"[MANUAL TRADE] Exception: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 def _check_ngrok():
     """Checks if a local Ngrok agent is running and prints the active public URL."""
@@ -1203,8 +1424,8 @@ def _hm(s: str) -> int:       h, m = map(int, s.split(":")); return h * 60 + m
 def _now_hm() -> int:         n = _now(); return n.hour * 60 + n.minute
 def _is_weekend() -> bool:    return _now().weekday() >= 5
 def _is_pre() -> bool:        return not _is_weekend() and _now_hm() < _hm(MARKET_OPEN)
-def _is_post() -> bool:       return not _is_weekend() and _now_hm() > _hm(MARKET_CLOSE)
-def _in_session() -> bool:    return not _is_weekend() and _hm(MARKET_OPEN) <= _now_hm() <= _hm(MARKET_CLOSE)
+def _is_post() -> bool:       return not _is_weekend() and _now_hm() >= _hm(MARKET_CLOSE)
+def _in_session() -> bool:    return not _is_weekend() and _hm(MARKET_OPEN) <= _now_hm() < _hm(MARKET_CLOSE)
 def _is_noisy() -> bool:
     """Skip first 15 mins and last 60 mins."""
     hm = _now_hm()
@@ -1259,7 +1480,7 @@ def _atr(df: pd.DataFrame, n: int = 14) -> Any:
 # ─── GROWW REAL PRICE FETCHER ───────────────────────────────────────────────────
 _chain_cache: Dict[str, dict] = {}  # index → chain data
 _chain_ts: Dict[str, datetime] = {}  # index → timestamp
-_last_dhan_warn_ts: Dict[str, datetime] = {}  # index → last warn timestamp
+# _last_dhan_warn_ts removed
 CHAIN_TTL = 60
 
 # Maps standard index name to (Spot API path, Option Chain API path)
@@ -1280,70 +1501,7 @@ GROWW_HEADERS = {
     "Accept": "application/json, text/plain, */*",
 }
 
-def _fetch_dhan_chain(index: str = "NIFTY") -> Optional[dict]:
-    """Dedicated function to fetch underlying spot price and option chain from Dhan API."""
-    try:
-        from dhan_client import dhan
-        dhan_ids = {
-            "NIFTY": "13",
-            "BANKNIFTY": "25",
-            "FINNIFTY": "27",
-            "MIDCPNIFTY": "50",
-            "SENSEX": "51",
-            "BANKEX": "52"
-        }
-        underlying_id = dhan_ids.get(index, "13")
-        
-        # 1. Fetch spot price (BSE indices are under IDX_B, NSE under IDX_I)
-        segment = "IDX_B" if index in ("SENSEX", "BANKEX") else "IDX_I"
-        ohlc = dhan.get_ohlc(underlying_id, segment)
-        val = ohlc.get("close")
-        if val is None:
-            val = ohlc.get("last_price", 0.0)
-        if val is None:
-            val = 0.0
-        spot = float(val)
-        
-        if spot <= 0:
-            now = datetime.now()
-            if index not in _last_dhan_warn_ts or (now - _last_dhan_warn_ts[index]).total_seconds() > 300:
-                log.warning(f"[DHAN] Spot price is 0 or negative for {index}. (Dhan API may be rate-limited, unauthenticated, or market is closed).")
-                _last_dhan_warn_ts[index] = now
-            return None
-            
-        # 2. Fetch option chain
-        expiry = _expiry(index)
-        df = dhan.get_option_chain(underlying_id, expiry)
-        if df.empty:
-            now = datetime.now()
-            if index not in _last_dhan_warn_ts or (now - _last_dhan_warn_ts[index]).total_seconds() > 300:
-                log.warning(f"[DHAN] Option chain dataframe is empty for {index}")
-                _last_dhan_warn_ts[index] = now
-            return None
-            
-        records = []
-        strikes = sorted(df["strike"].unique())
-        for strike in strikes:
-            ce_row = df[(df["strike"] == strike) & (df["option_type"] == "CE")]
-            pe_row = df[(df["strike"] == strike) & (df["option_type"] == "PE")]
-            ce_ltp = float(ce_row.iloc[0]["ltp"]) if not ce_row.empty else 0.0
-            pe_ltp = float(pe_row.iloc[0]["ltp"]) if not pe_row.empty else 0.0
-            if ce_ltp > 0 or pe_ltp > 0:
-                records.append({
-                    "strike": float(strike),
-                    "ce_ltp": ce_ltp,
-                    "pe_ltp": pe_ltp
-                })
-        
-        if records:
-            log.info(f"[DHAN] {index}: spot={spot:.2f} | {len(records)} strikes loaded via Dhan API")
-            return {"spot": spot, "records": records}
-    except Exception as e:
-        now = datetime.now()
-        if index not in _last_dhan_warn_ts or (now - _last_dhan_warn_ts[index]).total_seconds() > 300:
-            log.warning(f"[DHAN] Error fetching option chain for {index}: {e}")
-            _last_dhan_warn_ts[index] = now
-    return None
+# _fetch_dhan_chain removed (Groww only active broker)
 
 _groww_session = None
 
@@ -1615,7 +1773,7 @@ def _get_groww_contract_symbol(index: str, strike: float, opt: str) -> Optional[
 
 def _fetch_nse_chain(index: str = "NIFTY") -> Optional[dict]:
     """
-    Orchestrate fetching option chain from the active broker (Dhan or Groww) with dynamic TTL cache.
+    Orchestrate fetching option chain from the active broker (Groww) with dynamic TTL cache.
     Routes to dedicated helper functions and handles robust fallbacks.
     """
     global _chain_cache, _chain_ts
@@ -1640,22 +1798,7 @@ def _fetch_nse_chain(index: str = "NIFTY") -> Optional[dict]:
         log.warning(f"[ORCHESTRATOR] Unsupported index: {index}")
         return _chain_cache.get(index)
 
-    res = None
-    if _live_trading:
-        # LIVE Trading Mode: Fetch data from the active live broker
-        if _active_broker == "DHAN":
-            res = _fetch_dhan_chain(index)
-            if res is None:
-                now = datetime.now()
-                if index not in _last_dhan_warn_ts or (now - _last_dhan_warn_ts[index]).total_seconds() > 300:
-                    log.warning(f"[DHAN] Failed to fetch. Falling back transparently to Groww JSON API...")
-                    _last_dhan_warn_ts[index] = now
-                res = _fetch_groww_chain(index)
-        else:
-            res = _fetch_groww_chain(index)
-    else:
-        # DEMO / Paper Trading Mode: Always fetch using free, public unauthenticated Groww JSON API
-        res = _fetch_groww_chain(index)
+    res = _fetch_groww_chain(index)
 
     if res:
         _chain_cache[index] = res
@@ -1692,46 +1835,7 @@ def _get_nse_spot(index: str = "NIFTY") -> float:
     chain = _fetch_nse_chain(index)
     return chain.get("spot", 0.0) if chain else 0.0
 
-def _get_dhan_sec_id(index: str, strike: float, opt: str, expiry: str, client = None) -> Optional[str]:
-    """Resolve Option Contract Security ID from Dhan option chain."""
-    try:
-        from dhan_client import dhan
-        dhan_inst = client or dhan
-        dhan_ids = {
-            "NIFTY": "13",
-            "BANKNIFTY": "25",
-            "FINNIFTY": "27",
-            "MIDCPNIFTY": "50",
-            "SENSEX": "51",
-            "BANKEX": "52"
-        }
-        underlying_id = dhan_ids.get(index, "13")
-        
-        log.info(f"[DHAN] Querying option chain for {index} expiry {expiry} | strike {strike} {opt}...")
-        df = dhan_inst.get_option_chain(underlying_id, expiry)
-        if df.empty:
-            log.warning(f"[DHAN] Option chain for {index} expiry {expiry} returned empty.")
-            return None
-            
-        if index in ("SENSEX", "BANKNIFTY", "BANKEX"):
-            gap = 100
-        elif index in ("NIFTY", "FINNIFTY"):
-            gap = 50
-        elif index == "MIDCPNIFTY":
-            gap = 25
-        else:
-            gap = 50
-            
-        filtered = df[(df["option_type"] == opt) & (abs(df["strike"] - strike) < gap * 0.6)]
-        if not filtered.empty:
-            sec_id = filtered.iloc[0]["security_id"]
-            log.info(f"[DHAN] Resolved {index} {strike} {opt} expiry {expiry} -> sec_id={sec_id}")
-            return str(sec_id)
-        else:
-            log.warning(f"[DHAN] No matching contract found in option chain for {index} {strike} {opt}")
-    except Exception as e:
-        log.error(f"[DHAN] Error resolving security ID: {e}")
-    return None
+# _get_dhan_sec_id removed (Groww only active broker)
 
 # ─── YAHOO DATA ───────────────────────────────────────────────────────────────
 _yf_cache: Dict[Tuple[str, str], pd.DataFrame] = {}  # (index, interval) → data
@@ -2381,6 +2485,7 @@ class Pos:
     e9_15:      float
     e21_15:     float
     user_id:    int = 0
+    client_id:  str = ""
     is_open:    bool = True
     cur:        float = 0.0
     peak:       float = 0.0
@@ -2390,7 +2495,7 @@ class Pos:
     pnl:        float = 0.0
     dhan_order_id: str = ""
     dhan_sec_id:   str = ""
-    broker:        str = "DHAN"
+    broker:        str = "GROWW"
     entry_charges: float = 0.0
     exit_charges:  float = 0.0
     charges:       float = 0.0
@@ -2415,7 +2520,7 @@ class Pos:
 
 # ─── LIVE POSITION LTP FETCH ──────────────────────────────────────────────────
 def _get_live_position_ltp(p: 'Pos', client = None, live_trading = False) -> float:
-    """Fetch option live price from Groww or Dhan."""
+    """Fetch option live price from Groww."""
     if not live_trading:
         return 0.0
     try:
@@ -2424,10 +2529,6 @@ def _get_live_position_ltp(p: 'Pos', client = None, live_trading = False) -> flo
             contract_id = p.dhan_sec_id or p.dhan_order_id
             if contract_id and not contract_id.startswith("MOCK") and not contract_id.startswith("SYNC"):
                 return _get_groww_contract_ltp(contract_id)
-        elif broker_name == "DHAN" and client:
-            exchange_segment = "BSE_FNO" if p.index == "SENSEX" else "NSE_FNO"
-            if p.dhan_sec_id:
-                return client.get_ltp(p.dhan_sec_id, exchange_segment)
     except Exception as e:
         log.error(f"[LTP] Error getting live position LTP: {e}")
     return 0.0
@@ -2445,22 +2546,24 @@ class Book:
         self.active_broker = u_config.get("active_broker", "GROWW")
         self.live_trading = bool(u_config.get("live_trading", 0))
         self.trading_active = bool(u_config.get("trading_active", 1))
-        self.smart_filter_enabled = bool(u_config.get("smart_filter_enabled", 1))
+        is_admin = db_helper.is_admin_user(user_id)
+        if not is_admin:
+            self.smart_filter_enabled = False
+            self.ai_brain_enabled = False
+        else:
+            self.smart_filter_enabled = bool(u_config.get("smart_filter_enabled", 1))
+            self.ai_brain_enabled = bool(u_config.get("ai_brain_enabled", 1))
         self.trailing_sl_enabled = bool(u_config.get("trailing_sl_enabled", 1))
         self.risk_per_trade_pct = u_config.get("risk_per_trade_pct", 0.05)
         self.target_per_trade_pct = u_config.get("target_per_trade_pct", 0.15)
         self.sl_on_premium_pct = u_config.get("sl_on_premium_pct", 0.05)
         self.tp_on_premium_pct = u_config.get("tp_on_premium_pct", 0.15)
         
-        self.dhan_client_id = u_config.get("dhan_client_id", "")
-        self.dhan_access_token = u_config.get("dhan_access_token", "")
         self.groww_client_id = u_config.get("groww_client_id", "")
         self.groww_pin = u_config.get("groww_pin", "")
         
         # Initialize the user's specific clients
-        from dhan_client import DhanClient
         from groww_client import GrowwClientWrapper
-        self.dhan_client = DhanClient(client_id=self.dhan_client_id, access_token=self.dhan_access_token) if (self.dhan_client_id and self.dhan_access_token) else None
         self.groww_client = GrowwClientWrapper(groww_client_id=self.groww_client_id, groww_pin=self.groww_pin) if (self.groww_client_id and self.groww_pin) else None
         
         self.max_trades = MAX_TRADES
@@ -2472,6 +2575,13 @@ class Book:
         self._n        = 0
         self.day_pnl:  Dict[str, float] = {idx: 0.0 for idx in self.trading_indices}
         self.day_trades: Dict[str, int] = {idx: 0 for idx in self.trading_indices}
+        self.last_active_update = 0.0
+        
+        from ai_brain import AITradingBrain
+        self.ai_brain = AITradingBrain(user_id)
+        if self.ai_brain_enabled:
+            self.ai_brain.train_brain()
+
         
         # Load open positions from DB
         db_positions = db_helper.load_user_open_positions(user_id)
@@ -2489,7 +2599,7 @@ class Book:
             
             p = Pos(
                 tid=pos_dict["tid"], index=idx, direction=pos_dict["direction"],
-                user_id=user_id, is_open=True,
+                user_id=user_id, client_id=pos_dict.get("client_id", ""), is_open=True,
                 strike=pos_dict["strike"], opt=pos_dict["opt"], expiry=pos_dict["expiry"],
                 lots=pos_dict["lots"], contracts=pos_dict["contracts"],
                 entry=pos_dict["entry"], sl=pos_dict["sl"], tp=pos_dict["tp"],
@@ -2516,7 +2626,7 @@ class Book:
             is_pos_live = bool(pos_dict.get("is_live", 0))
             p = Pos(
                 tid=pos_dict["tid"], index=idx, direction=pos_dict["direction"],
-                user_id=user_id, is_open=False,
+                user_id=user_id, client_id=pos_dict.get("client_id", ""), is_open=False,
                 strike=pos_dict["strike"], opt=pos_dict["opt"], expiry=pos_dict["expiry"],
                 lots=pos_dict["lots"], contracts=pos_dict["contracts"],
                 entry=pos_dict["entry"], sl=pos_dict["sl"], tp=pos_dict["tp"],
@@ -2602,13 +2712,7 @@ class Book:
         
         if self.live_trading:
             available_balance = 0.0
-            if self.active_broker == "DHAN" and self.dhan_client:
-                try:
-                    broker_cap = self.dhan_client.get_broker_capital()
-                    available_balance = broker_cap.get("available", 0.0)
-                except Exception as e:
-                    log.error(f"[RISK] [{self.username}] Failed to get live Dhan capital: {e}")
-            elif self.active_broker == "GROWW" and self.groww_client:
+            if self.active_broker == "GROWW" and self.groww_client:
                 try:
                     broker_cap = self.groww_client.get_broker_capital()
                     available_balance = broker_cap.get("fno_available", 0.0) or broker_cap.get("available", 0.0)
@@ -2630,16 +2734,7 @@ class Book:
         if not lots_calculated:
             if self.live_trading:
                 # Dynamic index capital weight fallback
-                if self.active_broker == "DHAN" and self.dhan_client:
-                    try:
-                        broker_cap = self.dhan_client.get_broker_capital()
-                        if broker_cap.get("available", 0.0) > 0:
-                            total_config_capital = sum(CAPITAL_PER_INDEX.get(idx, 100000.0) for idx in self.trading_indices)
-                            ratio_weight = CAPITAL_PER_INDEX.get(index, 100000.0) / total_config_capital
-                            index_capital = broker_cap["available"] * ratio_weight
-                    except Exception:
-                        pass
-                elif self.active_broker == "GROWW" and self.groww_client:
+                if self.active_broker == "GROWW" and self.groww_client:
                     try:
                         broker_cap = self.groww_client.get_broker_capital()
                         if broker_cap.get("available", 0.0) > 0:
@@ -2703,42 +2798,18 @@ class Book:
         # Resolve dynamic contract and execute live order if live trading is active
         dhan_order_id = ""
         dhan_sec_id = ""
-        broker_name = "DHAN"
+        broker_name = "GROWW"
         is_super = False
         if self.live_trading:
             broker_name = self.active_broker
-            if broker_name == "DHAN":
-                sec_id = _get_dhan_sec_id(index, sig["strike"], sig["opt"], sig["expiry"], client=self.dhan_client)
-                if not sec_id:
-                    log.error(f"[{broker_name}] [{self.username}] Aborting order entry — Security ID unresolved.")
-                    return None
+            resolved = _get_groww_contract_symbol(index, sig["strike"], sig["opt"])
+            if resolved:
+                sec_id = resolved
             else:
-                resolved = _get_groww_contract_symbol(index, sig["strike"], sig["opt"])
-                if resolved:
-                    sec_id = resolved
-                else:
-                    sec_id = f"GRW_SEC_{int(sig['strike'])}_{sig['opt']}"
+                sec_id = f"GRW_SEC_{int(sig['strike'])}_{sig['opt']}"
                 
             # Place live order
-            if broker_name == "DHAN":
-                if cfg.dhan_super_order:
-                    dhan_order_id = place_dhan_super_order(
-                        sec_id=sec_id,
-                        action="BUY",
-                        quantity=contracts,
-                        index=index,
-                        entry_px=sig["entry"],
-                        sl_px=sig["sl"],
-                        tp_px=sig["tp"],
-                        client_id=self.dhan_client_id,
-                        access_token=self.dhan_access_token
-                    )
-                    if dhan_order_id:
-                        is_super = True
-                else:
-                    dhan_order_id = place_dhan_order(sec_id, "BUY", contracts, index, client=self.dhan_client)
-            else:
-                dhan_order_id = place_groww_order(sec_id, "BUY", contracts, index, client=self.groww_client)
+            dhan_order_id = place_groww_order(sec_id, "BUY", contracts, index, client=self.groww_client)
                 
             if not dhan_order_id:
                 log.error(f"[{broker_name}] [{self.username}] ❌ Live order placement failed. Aborting entry.")
@@ -2746,12 +2817,16 @@ class Book:
             dhan_sec_id = sec_id
 
         self._n  += 1
-        display_index = "ALGO_TRADING" if index == "NIFTY" else index
+        display_index = index
         tid       = f"{display_index}_{_now().strftime('%Y%m%d_%H%M%S')}_{self._n:03d}"
         entry_bd = calculate_charges_breakdown(sig["entry"], contracts, is_buy=True, index=index)
         spot_val = float(sig.get("spot") or sig.get("entry") or 0.0)
+        client_id_val = ""
+        if self.live_trading:
+            client_id_val = self.groww_client_id
+
         p = Pos(
-            tid=tid, index=index, user_id=self.user_id, is_open=True, direction=sig["direction"],
+            tid=tid, index=index, user_id=self.user_id, client_id=client_id_val, is_open=True, direction=sig["direction"],
             strike=sig["strike"], opt=sig["opt"], expiry=sig["expiry"],
             lots=lots, contracts=contracts,
             entry=float(sig["entry"]), sl=float(sig["sl"]), tp=float(sig["tp"]),
@@ -2791,7 +2866,8 @@ class Book:
         alert_entry(
             p.direction, p.strike, p.entry, p.sl, p.tp, 
             index=p.index, lots=p.lots, contracts=p.contracts,
-            guard_status=p.guard_status, predicted_win_prob=p.predicted_win_prob
+            guard_status=p.guard_status, predicted_win_prob=p.predicted_win_prob,
+            ai_rationale=sig.get('ai_rationale', '')
         )
         return p
 
@@ -2847,7 +2923,7 @@ class Book:
                                 self.day_trades[index] = 0
                                 
                             self._n += 1
-                            display_index = "ALGO_TRADING" if index == "NIFTY" else index
+                            display_index = index
                             tid = f"{display_index}_{_now().strftime('%Y%m%d_%H%M%S')}_{self._n:03d}"
                             strike = parsed["strike"]
                             opt = parsed["opt"]
@@ -2860,7 +2936,7 @@ class Book:
                             tp = round(entry_px * (1.0 + self.tp_on_premium_pct), 1)
                             
                             p = Pos(
-                                tid=tid, index=index, user_id=self.user_id, is_open=True, direction=opt,
+                                tid=tid, index=index, user_id=self.user_id, client_id=self.groww_client_id, is_open=True, direction="CALL" if opt == "CE" else "PUT",
                                 strike=strike, opt=opt, expiry=expiry, lots=lots, contracts=contracts,
                                 entry=entry_px, sl=sl, tp=tp, entry_time=_now(), entry_spot=strike,
                                 e9_15=0.0, e21_15=0.0, cur=entry_px, peak=entry_px,
@@ -2883,80 +2959,7 @@ class Book:
             except Exception as e:
                 log.error(f"[SYNC] Error syncing Groww positions for {self.username}: {e}")
 
-        elif self.active_broker == "DHAN" and self.dhan_client:
-            try:
-                sdk = getattr(self.dhan_client, "_dhan", None)
-                if not sdk or not hasattr(sdk, "get_positions"):
-                    return
-                pos_resp = sdk.get_positions()
-                if not pos_resp or not isinstance(pos_resp, dict) or pos_resp.get("status") != "success":
-                    return
-                
-                broker_positions = pos_resp.get("data", [])
-                active_symbols = set()
-                
-                for bp in broker_positions:
-                    segment = bp.get("exchangeSegment", "").upper()
-                    if "FNO" not in segment: continue
-                    symbol = bp.get("tradingSymbol", "")
-                    if not symbol: continue
-                    qty = int(bp.get("netQty", 0))
-                    if qty <= 0: continue
-                    active_symbols.add(symbol)
-                    
-                    found = False
-                    for idx in list(self.open.keys()):
-                        for tid, p in list(self.open[idx].items()):
-                            if p.dhan_sec_id == symbol or p.dhan_order_id == symbol:
-                                found = True
-                                break
-                                
-                    if not found:
-                        parsed = parse_fno_symbol(symbol)
-                        if parsed:
-                            index = parsed["index"]
-                            if index not in self.open:
-                                self.open[index] = {}
-                            if index not in self.day_pnl:
-                                self.day_pnl[index] = 0.0
-                            if index not in self.day_trades:
-                                self.day_trades[index] = 0
-                                
-                            self._n += 1
-                            display_index = "ALGO_TRADING" if index == "NIFTY" else index
-                            tid = f"{display_index}_{_now().strftime('%Y%m%d_%H%M%S')}_{self._n:03d}"
-                            strike = parsed["strike"]
-                            opt = parsed["opt"]
-                            expiry = parsed["expiry"]
-                            entry_px = float(bp.get("buyAvg", 0.0) or bp.get("lastPrice", 100.0))
-                            contracts = qty
-                            lot_size = int(INDEX_CONFIG[index]["lot_size"]) if index in INDEX_CONFIG else 1
-                            lots = max(1, contracts // lot_size)
-                            sl = round(entry_px * (1.0 - self.sl_on_premium_pct), 1)
-                            tp = round(entry_px * (1.0 + self.tp_on_premium_pct), 1)
-                            
-                            p = Pos(
-                                tid=tid, index=index, user_id=self.user_id, is_open=True, direction=opt,
-                                strike=strike, opt=opt, expiry=expiry, lots=lots, contracts=contracts,
-                                entry=entry_px, sl=sl, tp=tp, entry_time=_now(), entry_spot=strike,
-                                e9_15=0.0, e21_15=0.0, cur=entry_px, peak=entry_px,
-                                dhan_order_id=f"SYNC_{symbol}", dhan_sec_id=symbol,
-                                broker="DHAN", vix=_get_cached_vix(), atr_pct=0.005,
-                                is_super_order=False, trailing_sl_enabled=self.trailing_sl_enabled,
-                                is_live=self.live_trading
-                            )
-                            self.open[index][tid] = p
-                            db_helper.save_position(self.user_id, p)
-                            log.info(f"[SYNC] 📥 Imported Dhan position for {self.username}: {symbol} | Qty: {qty}")
-                                
-                for idx in list(self.open.keys()):
-                    for tid, p in list(self.open[idx].items()):
-                        if p.broker == "DHAN" and p.dhan_sec_id and p.dhan_sec_id not in active_symbols:
-                            if not p.dhan_order_id.startswith("MOCK"):
-                                log.info(f"[SYNC] 📤 Closing position {p.tid} ({p.dhan_sec_id}) for {self.username} (external exit).")
-                                self._close(p, p.cur, "EXTERNAL_EXIT")
-            except Exception as e:
-                log.error(f"[SYNC] Error syncing Dhan positions for {self.username}: {e}")
+
 
     def mtm(self) -> List[Pos]:
         """Reprice and manage open positions across all indices."""
@@ -2965,7 +2968,7 @@ class Book:
             for tid, p in list(self.open[index].items()):
                 real_ltp = 0.0
                 if self.live_trading:
-                    real_ltp = _get_live_position_ltp(p, client=self.groww_client if p.broker == "GROWW" else self.dhan_client, live_trading=self.live_trading)
+                    real_ltp = _get_live_position_ltp(p, client=self.groww_client, live_trading=self.live_trading)
                 if real_ltp <= 0:
                     real_ltp = _get_nse_ltp(p.strike, p.opt, index)
                 ltp = real_ltp if real_ltp > 0 else p.cur
@@ -3003,18 +3006,7 @@ class Book:
 
         # Offsetting sell order
         if p.dhan_order_id and p.dhan_sec_id:
-            broker_name = getattr(p, "broker", "DHAN")
-            if broker_name == "DHAN":
-                if getattr(p, "is_super_order", False):
-                    if reason not in ("STOP_LOSS", "TARGET"):
-                        cancel_dhan_super_order(p.dhan_order_id, access_token=self.dhan_access_token)
-                        place_dhan_order(p.dhan_sec_id, "SELL", p.contracts, index, client=self.dhan_client)
-                    else:
-                        log.info(f"[DHAN-SUPER] Native TP/SL trigger hit for {self.username}.")
-                else:
-                    place_dhan_order(p.dhan_sec_id, "SELL", p.contracts, index, client=self.dhan_client)
-            else:
-                place_groww_order(p.dhan_sec_id, "SELL", p.contracts, index, client=self.groww_client)
+            place_groww_order(p.dhan_sec_id, "SELL", p.contracts, index, client=self.groww_client)
 
         p.exit_px    = exit_px
         p.exit_time  = _now()
@@ -3046,7 +3038,7 @@ class Book:
         self.total_capital += p.pnl
         
         tag = "WIN" if p.pnl > 0 else "LOSS"
-        display_index = "ALGO_TRADING" if index == "NIFTY" else index
+        display_index = index
         log.info(f"\n{'='*55}")
         log.info(f"  {tag}  {p.tid} | User: {self.username}")
         log.info(f"  {reason} | Net PnL=Rs.{p.pnl:+,.0f}")
@@ -3062,11 +3054,18 @@ class Book:
         except Exception as ex:
             log.warning(f"[Guard] Error updating stats: {ex}")
 
+        if getattr(self, "ai_brain_enabled", True) and hasattr(self, "ai_brain"):
+            try:
+                self.ai_brain.train_brain()
+            except Exception as e:
+                log.error(f"[AI] Error retraining brain after close: {e}")
         # Alerts
         if p.pnl > 0:
-            alert_win(p.tid, p.pnl, p.pnl_pct, p.exit_px, lots=p.lots, contracts=p.contracts)
+            alert_win(p.tid, p.pnl, p.pnl_pct, p.exit_px, lots=p.lots, contracts=p.contracts,
+                      index=p.index, direction=p.direction, strike=p.strike, opt=p.opt, entry=p.entry)
         else:
-            alert_loss(p.tid, p.pnl, p.pnl_pct, p.exit_px, reason, lots=p.lots, contracts=p.contracts)
+            alert_loss(p.tid, p.pnl, p.pnl_pct, p.exit_px, reason, lots=p.lots, contracts=p.contracts,
+                       index=p.index, direction=p.direction, strike=p.strike, opt=p.opt, entry=p.entry)
 
         return p
 
@@ -3225,7 +3224,39 @@ def run():
                             book.day_trades[idx] < book.max_daily_trades_per_index):
                             sig = signals.get(idx)
                             if sig:
-                                book.enter(sig)
+                                proceed_with_trade = True
+                                ai_rationale = ""
+                                if getattr(book, 'ai_brain_enabled', True) and hasattr(book, 'ai_brain'):
+                                    from ai_brain import SignalType
+                                    ai_signal = book.ai_brain.predict_market_state(
+                                        e9=sig['e9_15'], 
+                                        e21=sig['e21_15'], 
+                                        vix=vix, 
+                                        atr=sig['atr_pct']/100, 
+                                        current_time=_now()
+                                    )
+                                    
+                                    if cfg.ai_autonomous_trading:
+                                        if (sig['direction'] == "CALL" and ai_signal != SignalType.CALL) or \
+                                           (sig['direction'] == "PUT" and ai_signal != SignalType.PUT):
+                                            log.info(f"[AI] {book.username}'s Brain rejected {sig['direction']} on {idx}")
+                                            proceed_with_trade = False
+                                        else:
+                                            log.info(f"[AI] {book.username}'s Brain APPROVED {sig['direction']} on {idx}")
+                                            
+                                    if proceed_with_trade and cfg.gemini_api_key:
+                                        ai_rationale = book.ai_brain.generate_llm_rationale(
+                                            signal=ai_signal, 
+                                            api_key=cfg.gemini_api_key,
+                                            market_context={"vix": vix, "atr": sig['atr_pct']}
+                                        )
+                                        log.info(f"[AI-LLM] {book.username}: {ai_rationale}")
+                                
+                                if proceed_with_trade:
+                                    if ai_rationale:
+                                        sig = sig.copy()
+                                        sig['ai_rationale'] = ai_rationale
+                                    book.enter(sig)
             except Exception as uid_err:
                 log.error(f"[MAIN] Exception during trading loop for user ID {uid}: {uid_err}")
 
@@ -3266,14 +3297,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ALGO PULSE | Multi-Index Option Trader</title>
+<script>
+  (function() {
+    const theme = localStorage.getItem('theme') || 'dark';
+    if (theme === 'light') {
+      document.documentElement.classList.add('light');
+    }
+  })();
+</script>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
   --bg:#030712;
-  --s:rgba(17, 24, 39, 0.65);
-  --card:rgba(22, 28, 45, 0.6);
+  --s:rgba(15, 23, 42, 0.35);
+  --card:rgba(15, 23, 42, 0.45);
   --border:rgba(255, 255, 255, 0.08);
   --green:#00ff88;
   --red:#ff007f;
@@ -3300,9 +3339,9 @@ body::before {
   left: -20%;
   width: 140%;
   height: 140%;
-  background: radial-gradient(circle at 15% 20%, rgba(157, 78, 221, 0.22) 0%, transparent 45%),
-              radial-gradient(circle at 85% 80%, rgba(0, 240, 255, 0.18) 0%, transparent 50%),
-              radial-gradient(circle at 50% 50%, rgba(255, 0, 127, 0.15) 0%, transparent 55%);
+  background: radial-gradient(circle at 15% 20%, rgba(157, 78, 221, 0.28) 0%, transparent 45%),
+              radial-gradient(circle at 85% 80%, rgba(0, 240, 255, 0.24) 0%, transparent 50%),
+              radial-gradient(circle at 50% 50%, rgba(255, 0, 127, 0.2) 0%, transparent 55%);
   z-index: -1;
   pointer-events: none;
   animation: floatBg 25s ease-in-out infinite alternate;
@@ -3414,6 +3453,47 @@ body::before {
 }
 .dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green);animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.3;transform:scale(1.2);}}
+.soothing-clock {
+  position: fixed;
+  bottom: 16px;
+  left: 20px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 16px;
+  background: rgba(17, 24, 39, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #e2e8f0;
+  text-shadow: 0 0 8px rgba(0, 240, 255, 0.15);
+  box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+  transition: all 0.3s ease;
+}
+.soothing-clock:hover {
+  background: rgba(0, 240, 255, 0.03);
+  border-color: rgba(0, 240, 255, 0.25);
+  text-shadow: 0 0 12px rgba(0, 240, 255, 0.4);
+  box-shadow: 0 0 15px rgba(0, 240, 255, 0.1), inset 0 0 8px rgba(0, 240, 255, 0.05);
+}
+.clock-time {
+  font-weight: 700;
+  color: #00f0ff;
+  letter-spacing: 0.8px;
+}
+.clock-divider {
+  color: rgba(255, 255, 255, 0.2);
+  font-weight: 300;
+}
+.clock-date {
+  font-weight: 500;
+  color: #c7d2fe;
+  letter-spacing: 0.5px;
+}
 .wrap{max-width:1600px;margin:0 auto;padding:20px 28px}
 .ticker{
   background:var(--s);
@@ -3441,14 +3521,14 @@ body::before {
 .metrics{display:grid;grid-template-columns:repeat(8,1fr);gap:14px;margin-bottom:20px}
 .mc{
   background:var(--card);
-  backdrop-filter:blur(12px);
-  -webkit-backdrop-filter:blur(12px);
+  backdrop-filter:blur(20px);
+  -webkit-backdrop-filter:blur(20px);
   border:1px solid var(--border);
   border-radius:12px;
-  padding:18px;
+  padding:18px 10px;
   position:relative;
   overflow:hidden;
-  box-shadow:0 8px 24px rgba(0,0,0,0.35);
+  box-shadow:0 8px 32px rgba(0,0,0,0.45);
   transition:all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .mc:hover{
@@ -3464,7 +3544,7 @@ body::before {
 .mc::before{content:'';position:absolute;top:0;left:0;right:0;height:4px}
 .mc.blue::before{background:linear-gradient(90deg, var(--blue), #0072ff);}.mc.green::before{background:linear-gradient(90deg, var(--green), #00b300);}.mc.red::before{background:linear-gradient(90deg, var(--red), #ff0033);}.mc.gold::before{background:linear-gradient(90deg, var(--gold), #ff8000);}.mc.purple::before{background:linear-gradient(90deg, var(--pink), var(--accent));}.mc.teal::before{background:linear-gradient(90deg, #00ffcc, #00a896);}.mc.orange::before{background:linear-gradient(90deg, #ff8c00, #ff4500);}
 .mc-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;font-weight:700;margin-bottom:8px}
-.mc-val{font-size:22px;font-weight:700;font-family:'JetBrains Mono',monospace;}
+.mc-val{font-size:18px;font-weight:700;font-family:'JetBrains Mono',monospace;}
 .mc.blue .mc-val{color:var(--blue);text-shadow:0 0 10px rgba(0,240,255,0.25);}
 .mc.purple .mc-val{color:#f5d0ff;text-shadow:0 0 10px rgba(255,0,228,0.25);}
 .mc.green .mc-val{color:var(--green);text-shadow:0 0 10px rgba(0,255,136,0.25);}
@@ -3475,11 +3555,7 @@ body::before {
 
 .mc-sub{font-size:11px;color:var(--muted);margin-top:5px;font-weight:600;}
 .charts{display:grid;grid-template-columns:1.4fr 1fr;gap:16px;margin-bottom:20px}
-.chart-box{height:300px;position:relative;width:100%;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;scrollbar-color:var(--accent) transparent}
-.chart-box::-webkit-scrollbar{height:6px}
-.chart-box::-webkit-scrollbar-track{background:transparent}
-.chart-box::-webkit-scrollbar-thumb{background:rgba(157,78,221,0.4);border-radius:10px}
-.chart-box::-webkit-scrollbar-thumb:hover{background:rgba(157,78,221,0.8)}
+.chart-box{height:300px;position:relative;width:100%}
 
 .eq-glow{position:absolute;inset:0;border-radius:10px;pointer-events:none;background:radial-gradient(ellipse at 50% 110%,rgba(0,255,136,.18) 0%,transparent 70%);animation:glowPulse 3s ease-in-out infinite}
 @keyframes glowPulse{0%,100%{opacity:.6}50%{opacity:1}}
@@ -3539,18 +3615,33 @@ td{padding:6px 10px;font-size:10.5px;font-family:'JetBrains Mono',monospace;colo
 .term::-webkit-scrollbar{width:4px}.term::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:2px;}
 .ll{white-space:pre-wrap;word-break:break-all}.ll.win{color:var(--green)}.ll.loss{color:var(--red)}
 .refresh-bar{
-  position:fixed;
-  bottom:16px;
-  right:20px;
-  background:rgba(17, 24, 39, 0.85);
-  backdrop-filter:blur(8px);
-  border:1px solid var(--border);
-  border-radius:16px;
-  padding:6px 14px;
-  font-size:11px;
-  color:var(--muted);
-  font-weight:600;
-  box-shadow:0 4px 15px rgba(0,0,0,0.3);
+  display: none !important;
+}
+.bottom-right-controls {
+  position: fixed;
+  bottom: 16px;
+  right: 20px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(9, 13, 26, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 5px 10px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+}
+.bottom-right-controls .live-badge {
+  padding: 4px 10px;
+  font-size: 10px;
+  border-radius: 12px;
+}
+.bottom-right-controls button {
+  padding: 5px 12px !important;
+  font-size: 10px !important;
+  border-radius: 12px !important;
 }
 @media(max-width:1100px){.metrics{grid-template-columns:repeat(3,1fr)}.charts,.bottom{grid-template-columns:1fr}}
 @media(max-width:768px){.metrics{grid-template-columns:repeat(2,1fr);gap:10px}.mc{padding:12px}.mc-val{font-size:17px}.mc-lbl{font-size:9px;margin-bottom:6px}.mc-sub{font-size:10px;margin-top:4px}}
@@ -3817,12 +3908,6 @@ input:checked + .slider:before {
 .broker-btn:hover {
   color: var(--text);
 }
-.broker-btn.active#dhanBrokerBtn {
-  background: linear-gradient(135deg, rgba(0, 255, 136, 0.2) 0%, rgba(0, 229, 255, 0.2) 100%);
-  color: var(--green);
-  border: 1px solid rgba(0, 255, 136, 0.4);
-  box-shadow: 0 0 12px rgba(0, 255, 136, 0.25);
-}
 .broker-btn.active#growwBrokerBtn {
   background: linear-gradient(135deg, rgba(157, 78, 221, 0.25) 0%, rgba(255, 0, 228, 0.25) 100%);
   color: #d68aff;
@@ -4086,12 +4171,12 @@ input:checked + .slider:before {
 /* Card Container Styling */
 .card {
   background: var(--card);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 22px 24px;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.45);
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   display: flex;
   flex-direction: column;
@@ -4171,6 +4256,30 @@ input:checked + .slider:before {
 .squareoff-btn:active {
   transform: translateY(1px);
 }
+.manual-trade-btn {
+  background: linear-gradient(135deg, #7c4dff 0%, #00f0ff 100%);
+  color: #030712;
+  border: 1px solid rgba(124, 77, 255, 0.4);
+  border-radius: 20px;
+  padding: 8px 18px;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 0 12px rgba(124, 77, 255, 0.3);
+}
+.manual-trade-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 0 20px rgba(0, 240, 255, 0.6);
+  background: linear-gradient(135deg, #966eff 0%, #33f3ff 100%);
+}
+.manual-trade-btn:active {
+  transform: translateY(1px);
+}
+
 
 /* Auth Screen Styles */
 #authApp {
@@ -4313,6 +4422,233 @@ input:checked + .slider:before {
   border: 1px solid rgba(0, 255, 136, 0.25);
   color: var(--green);
 }
+
+/* Theme Toggle Button Style */
+.theme-toggle {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 18px;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+}
+.theme-toggle:hover {
+  background: rgba(255, 255, 255, 0.1);
+  transform: rotate(15deg) scale(1.05);
+  border-color: var(--blue);
+  box-shadow: 0 0 12px rgba(0, 240, 255, 0.25);
+}
+
+/* Light Theme Variables */
+:root.light {
+  --bg:#f1f5f9;
+  --s:rgba(241, 245, 249, 0.85);
+  --card:rgba(255, 255, 255, 0.7);
+  --border:rgba(15, 23, 42, 0.08);
+  --green:#0f766e;
+  --red:#be123c;
+  --blue:#0369a1;
+  --gold:#b45309;
+  --text:#0f172a;
+  --muted:#475569;
+  --accent:#6d28d9;
+  --pink:#db2777;
+}
+
+/* Light Theme Components Override */
+:root.light body::before {
+  background: radial-gradient(circle at 15% 20%, rgba(124, 58, 237, 0.15) 0%, transparent 55%),
+              radial-gradient(circle at 85% 80%, rgba(14, 165, 233, 0.15) 0%, transparent 55%),
+              radial-gradient(circle at 50% 50%, rgba(244, 63, 94, 0.1) 0%, transparent 60%);
+}
+:root.light .theme-toggle {
+  background: rgba(15, 23, 42, 0.05);
+  box-shadow: 0 4px 10px rgba(0,0,0,0.05);
+}
+:root.light .theme-toggle:hover {
+  background: rgba(15, 23, 42, 0.1);
+  border-color: var(--blue);
+  box-shadow: 0 0 12px rgba(3, 105, 161, 0.25);
+}
+:root.light .hdr {
+  background: rgba(255, 255, 255, 0.85);
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.05);
+}
+:root.light .hdr-title {
+  background: linear-gradient(90deg, #0369a1 0%, #db2777 50%, #b45309 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+:root.light .soothing-clock {
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  color: #0f172a;
+}
+:root.light .clock-time {
+  color: #0369a1;
+}
+:root.light .clock-date {
+  color: #64748b;
+}
+:root.light .table-scroll th, :root.light .index-table-scroll th {
+  background: #f1f5f9;
+  box-shadow: inset 0 -1px 0 rgba(15, 23, 42, 0.08);
+}
+:root.light td {
+  color: #0f172a;
+}
+:root.light tbody tr:hover {
+  background: rgba(15, 23, 42, 0.02);
+}
+:root.light .term {
+  background: #f1f5f9;
+  border-color: rgba(15, 23, 42, 0.08);
+}
+:root.light .term-line {
+  color: #0f172a;
+}
+:root.light .term-line.sys {
+  color: #0369a1;
+}
+:root.light .term-line.log {
+  color: #0f172a;
+}
+:root.light input, :root.light select {
+  background: #ffffff;
+  color: #0f172a;
+  border: 1px solid rgba(15, 23, 42, 0.15);
+}
+:root.light input:focus, :root.light select:focus {
+  border-color: #0369a1;
+}
+:root.light .modal-content, :root.light .card {
+  background: var(--card);
+  border-color: var(--border);
+  color: #0f172a;
+  box-shadow: 0 8px 32px rgba(15, 23, 42, 0.05);
+}
+:root.light #squareoffSelectModal .card {
+  background: #ffffff;
+  border-color: rgba(225, 29, 72, 0.4);
+}
+:root.light .dot {
+  background: #10b981;
+}
+:root.light .live-badge {
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  color: #0f766e;
+}
+
+/* Light Mode Card-specific Overrides */
+:root.light .smart-card {
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.05) 0%, rgba(14, 165, 233, 0.03) 100%) !important;
+  border-color: rgba(124, 58, 237, 0.25) !important;
+}
+:root.light .ai-card {
+  background: linear-gradient(135deg, rgba(219, 39, 119, 0.05) 0%, rgba(124, 58, 237, 0.03) 100%) !important;
+  border-color: rgba(219, 39, 119, 0.25) !important;
+}
+:root.light .user-mgmt-card {
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.05) 0%, rgba(124, 58, 237, 0.03) 100%) !important;
+  border-color: rgba(14, 165, 233, 0.25) !important;
+}
+:root.light .card > div {
+  border-bottom-color: rgba(15, 23, 42, 0.08) !important;
+}
+
+/* Light Mode Card Titles */
+:root.light .smart-card span[style*="color:#c7d2fe"] {
+  color: #6d28d9 !important;
+  text-shadow: none !important;
+}
+:root.light .ai-card span[style*="color:#ffb3f7"] {
+  color: #db2777 !important;
+  text-shadow: none !important;
+}
+:root.light .user-mgmt-card .card-title {
+  color: #0284c7 !important;
+  text-shadow: none !important;
+}
+
+/* Light Mode Card Details Boxes */
+:root.light .card div[style*="background:rgba(255,255,255,0.02)"],
+:root.light .card div[style*="background: rgba(255, 255, 255, 0.02)"] {
+  background: rgba(15, 23, 42, 0.04) !important;
+  border-color: rgba(15, 23, 42, 0.08) !important;
+}
+
+/* Light Mode Controls Override */
+:root.light .mode-selector, :root.light .broker-selector, :root.light .chart-tabs {
+  background: rgba(255, 255, 255, 0.85);
+  border-color: rgba(15, 23, 42, 0.08);
+  box-shadow: inset 0 1px 3px rgba(15, 23, 42, 0.05), 0 2px 8px rgba(15, 23, 42, 0.03);
+}
+:root.light .mode-btn.active#demoModeBtn {
+  background: linear-gradient(135deg, rgba(3, 105, 161, 0.15) 0%, rgba(3, 105, 161, 0.25) 100%);
+  color: #0369a1;
+  border-color: rgba(3, 105, 161, 0.3);
+  box-shadow: 0 4px 12px rgba(3, 105, 161, 0.15);
+}
+:root.light .mode-btn.active#liveModeBtn {
+  background: linear-gradient(135deg, rgba(220, 38, 38, 0.15) 0%, rgba(220, 38, 38, 0.25) 100%);
+  color: #be123c;
+  border-color: rgba(220, 38, 38, 0.3);
+  box-shadow: 0 4px 12px rgba(220, 38, 38, 0.15);
+}
+:root.light .broker-btn.active#dhanBrokerBtn {
+  background: linear-gradient(135deg, rgba(13, 148, 136, 0.15) 0%, rgba(13, 148, 136, 0.25) 100%);
+  color: #0f766e;
+  border-color: rgba(13, 148, 136, 0.3);
+  box-shadow: 0 4px 12px rgba(13, 148, 136, 0.15);
+}
+:root.light .broker-btn.active#growwBrokerBtn {
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.15) 0%, rgba(124, 58, 237, 0.25) 100%);
+  color: #6d28d9;
+  border-color: rgba(124, 58, 237, 0.3);
+  box-shadow: 0 4px 12px rgba(124, 58, 237, 0.15);
+}
+:root.light .slider {
+  background-color: #e2e8f0;
+}
+:root.light input:checked + .slider {
+  background-color: rgba(124, 58, 237, 0.2);
+  border-color: rgba(124, 58, 237, 0.5);
+  box-shadow: 0 0 10px rgba(124, 58, 237, 0.15);
+}
+:root.light input:checked + .slider:before {
+  background-color: #7c3aed;
+  box-shadow: 0 0 8px rgba(124, 58, 237, 0.4);
+}
+
+/* Light Mode Metrics Card Text Overrides */
+:root.light .mc {
+  box-shadow: 0 8px 32px rgba(15, 23, 42, 0.04);
+}
+:root.light .mc.blue:hover { box-shadow: 0 10px 25px rgba(3, 99, 161, 0.15); }
+:root.light .mc.purple:hover { box-shadow: 0 10px 25px rgba(109, 40, 217, 0.15); }
+:root.light .mc.green:hover { box-shadow: 0 10px 25px rgba(15, 118, 110, 0.15); }
+:root.light .mc.gold:hover { box-shadow: 0 10px 25px rgba(180, 83, 9, 0.15); }
+:root.light .mc.red:hover { box-shadow: 0 10px 25px rgba(190, 18, 60, 0.15); }
+:root.light .mc.teal:hover { box-shadow: 0 10px 25px rgba(13, 148, 136, 0.15); }
+:root.light .mc.orange:hover { box-shadow: 0 10px 25px rgba(234, 88, 12, 0.15); }
+
+:root.light .mc.blue .mc-val { color: var(--blue); text-shadow: none; }
+:root.light .mc.purple .mc-val { color: var(--accent); text-shadow: none; }
+:root.light .mc.green .mc-val { color: var(--green); text-shadow: none; }
+:root.light .mc.gold .mc-val { color: var(--gold); text-shadow: none; }
+:root.light .mc.red .mc-val { color: var(--red); text-shadow: none; }
+:root.light .mc.teal .mc-val { color: #0f766e; text-shadow: none; }
+:root.light .mc.orange .mc-val { color: #ea580c; text-shadow: none; }
+
 </style>
 </head>
 <body>
@@ -4374,7 +4710,9 @@ input:checked + .slider:before {
     </div>
   </div>
   <div style="display:flex;align-items:center;gap:16px">
-    <span style="font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace" id="luTime"></span>
+    <button id="themeToggleBtn" onclick="toggleTheme()" class="theme-toggle" title="Toggle Light/Dark Theme" style="margin-right: 4px;">
+      <span class="theme-icon">🌙</span>
+    </button>
     <div class="mode-selector">
       <button id="demoModeBtn" class="mode-btn active" onclick="switchMode('DEMO')">🎮 DEMO</button>
       <button id="liveModeBtn" class="mode-btn" onclick="switchMode('LIVE')">⚡ LIVE</button>
@@ -4394,16 +4732,14 @@ input:checked + .slider:before {
         <label style="--glow-color: #ffa500; --text-color: #ffa500;"><input type="checkbox" value="BANKEX" onchange="handleIndexChange()"> <span>⬡ BANKEX</span></label>
       </div>
     </div>
-    <div class="live-badge"><div class="dot"></div>LIVE</div>
     <button id="startBtn" class="start-btn" onclick="startTrading()" style="display:none;">▶️ START ALGO</button>
     <button id="stopBtn" class="stop-btn" onclick="stopTrading()">🛑 STOP ALGO</button>
+    <button id="manualTradeBtn" class="manual-trade-btn" onclick="openManualTradeModal()">⚡ MANUAL TRADE</button>
     <button id="squareoffBtn" class="squareoff-btn" onclick="openSquareoffSelectModal()">⚡ SQUARE OFF</button>
-    <button id="downloadBtn" class="download-btn" onclick="downloadTrades()">📥 DOWNLOAD TRADES</button>
-    <button id="resetBtn" class="reset-btn" disabled style="opacity: 0.4; cursor: not-allowed; pointer-events: none;" onclick="resetTradingLog()">🔄 RESET LOGS</button>
   </div>
 </div>
 <div class="wrap">
-<div class="metrics"><div class="mc blue"><div class="mc-lbl">Capital</div><div class="mc-val" id="mCap">—</div><div class="mc-sub" id="mCapSub">Base: —</div></div><div class="mc purple"><div class="mc-lbl">Total P&L</div><div class="mc-val" id="mPnl">—</div><div class="mc-sub" id="mPnlPct">—</div></div><div class="mc orange" style="cursor:pointer;" onclick="showOverallCharges()"><div class="mc-lbl">Total Charges</div><div class="mc-val" id="mCharges">—</div><div class="mc-sub" id="mChargesSub">—</div></div><div class="mc green"><div class="mc-lbl">Win Rate</div><div class="mc-val g" id="mWR">—</div><div class="mc-sub" id="mWL">— W / — L</div></div><div class="mc gold"><div class="mc-lbl">Avg Win</div><div class="mc-val g" id="mAW">—</div><div class="mc-sub" id="mRR">R:R —</div></div><div class="mc red"><div class="mc-lbl">Avg Loss</div><div class="mc-val r" id="mAL">—</div><div class="mc-sub" id="mTC">— trades</div></div><div class="mc teal"><div class="mc-lbl">Best Trade</div><div class="mc-val g" id="mBest">—</div><div class="mc-sub" id="mWorst">Worst: —</div></div><div class="mc purple" id="vixCard"><div class="mc-lbl">India VIX</div><div class="mc-val" id="mVix">—</div><div class="mc-sub" id="mVixSub">Real-time Volatility</div></div></div>
+<div class="metrics"><div class="mc blue" onclick="promptUpdateCapital()"><div class="mc-lbl">Capital</div><div class="mc-val" id="mCap">—</div><div class="mc-sub" id="mCapSub">Base: —</div></div><div class="mc purple"><div class="mc-lbl">Total P&L</div><div class="mc-val" id="mPnl">—</div><div class="mc-sub" id="mPnlPct">—</div></div><div class="mc orange" style="cursor:pointer;" onclick="showOverallCharges()"><div class="mc-lbl">Total Charges</div><div class="mc-val" id="mCharges">—</div><div class="mc-sub" id="mChargesSub">—</div></div><div class="mc green"><div class="mc-lbl">Win Rate</div><div class="mc-val g" id="mWR">—</div><div class="mc-sub" id="mWL">— W / — L</div></div><div class="mc gold"><div class="mc-lbl">Avg Win</div><div class="mc-val g" id="mAW">—</div><div class="mc-sub" id="mRR">R:R —</div></div><div class="mc red"><div class="mc-lbl">Avg Loss</div><div class="mc-val r" id="mAL">—</div><div class="mc-sub" id="mTC">— trades</div></div><div class="mc teal"><div class="mc-lbl">Best Trade</div><div class="mc-val g" id="mBest">—</div><div class="mc-sub" id="mWorst">Worst: —</div></div><div class="mc purple" id="vixCard"><div class="mc-lbl">India VIX</div><div class="mc-val" id="mVix">—</div><div class="mc-sub" id="mVixSub">Real-time Volatility</div></div></div>
 
 <!-- Smart Signal Guard Control Card -->
 <div class="card smart-card" style="margin-bottom:20px; border-color: rgba(124, 77, 255, 0.35); background: linear-gradient(135deg, rgba(124, 77, 255, 0.02) 0%, rgba(0, 240, 255, 0.01) 100%);">
@@ -4445,6 +4781,62 @@ input:checked + .slider:before {
   </div>
 </div>
 
+<!-- AI Brain Control Card -->
+<div class="card ai-card" style="margin-bottom:20px; border-color: rgba(255, 0, 228, 0.35); background: linear-gradient(135deg, rgba(255, 0, 228, 0.02) 0%, rgba(157, 78, 221, 0.01) 100%);">
+  <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.06); padding-bottom:12px; margin-bottom:16px;">
+    <div style="display:flex; align-items:center; gap:8px;">
+      <span style="font-size:18px;">🧠</span>
+      <span style="font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:1.5px; color:#ffb3f7; text-shadow:0 0 10px rgba(255, 0, 228, 0.4)">AI Trading Brain</span>
+    </div>
+    <!-- Custom Switch Toggle -->
+    <div style="display:flex; align-items:center; gap:10px;">
+      <span style="font-size:10px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.8px;">Brain Status</span>
+      <label class="switch">
+        <input type="checkbox" id="aiToggleInput" onchange="toggleAIBrain(this.checked)">
+        <span class="slider round"></span>
+      </label>
+    </div>
+  </div>
+  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); gap:16px;">
+    <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
+      <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Status</div>
+      <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace;" id="aiStatus">—</div>
+    </div>
+    <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
+      <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Trained Samples</div>
+      <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace; color:var(--blue);" id="aiSamples">—</div>
+    </div>
+    <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
+      <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Model Accuracy</div>
+      <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace; color:var(--gold);" id="aiAccuracy">—</div>
+    </div>
+  </div>
+</div>
+
+<!-- User Management Card for Admin only -->
+<div class="card user-mgmt-card" id="userMgmtCard" style="margin-bottom:20px; border-color: rgba(0, 240, 255, 0.35); background: linear-gradient(135deg, rgba(0, 240, 255, 0.02) 0%, rgba(124, 77, 255, 0.01) 100%); display: none;">
+  <div class="card-title" style="border-bottom:1px solid rgba(255,255,255,0.06); padding-bottom:12px; margin-bottom:16px; font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:1.5px; color:#00f0ff; text-shadow:0 0 10px rgba(0, 240, 255, 0.4)">
+    👥 SYSTEM USER CREDENTIALS (ADMIN ONLY)
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th style="text-align:left; font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; padding:8px;">Username / ID</th>
+        <th style="text-align:left; font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; padding:8px;">Plaintext Password</th>
+        <th style="text-align:left; font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; padding:8px;">Role</th>
+        <th style="text-align:left; font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; padding:8px;">Registered At</th>
+        <th style="text-align:left; font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; padding:8px;">Active Today</th>
+        <th style="text-align:left; font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; padding:8px;">Live Broker</th>
+        <th style="text-align:left; font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; padding:8px;">Trading Status</th>
+        <th style="text-align:left; font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; padding:8px;">Actions</th>
+      </tr>
+    </thead>
+    <tbody id="userMgmtTbody">
+      <!-- Injected via JavaScript -->
+    </tbody>
+  </table>
+</div>
+
 
 <!-- Active Open Positions -->
 <div class="card open-pos-card" id="openPosCard" style="margin-bottom:20px;display:none;">
@@ -4475,7 +4867,7 @@ input:checked + .slider:before {
   </table>
 </div>
 
-<div class="charts"><div class="card eq-wrap"><div class="card-title" style="display:flex;justify-content:space-between;align-items:center;"><span>📊 PERFORMANCE TRAJECTORY</span><div class="chart-tabs"><button id="btnEquityWeb" class="chart-tab active" onclick="switchWebChart('equity')">📈 Equity Curve</button><button id="btnDrawdownWeb" class="chart-tab" onclick="switchWebChart('drawdown')">📉 Drawdown</button></div></div><div class="chart-box" style="position:relative;" id="equityWebChartContainer"><div id="eqWrapper" style="width:100%;height:100%;position:relative;"><canvas id="eq"></canvas><canvas id="eqSpark"></canvas></div><div class="eq-glow"></div></div><div class="chart-box" style="position:relative;display:none;" id="drawdownWebChartContainer"><div id="ddWrapper" style="width:100%;height:100%;position:relative;"><canvas id="ddChart"></canvas></div></div></div><div class="card"><div class="card-title">Win/Loss Per Trade</div><div class="chart-box" style="position:relative;" id="wlChartContainer"><div id="wlWrapper" style="width:100%;height:100%;position:relative;"><canvas id="wl"></canvas></div></div></div></div>
+<div class="charts"><div class="card eq-wrap"><div class="card-title" style="display:flex;justify-content:space-between;align-items:center;"><span>📊 PERFORMANCE TRAJECTORY</span><div class="chart-tabs"><button id="btnEquityWeb" class="chart-tab active" onclick="switchWebChart('equity')">📈 Equity Curve</button><button id="btnDrawdownWeb" class="chart-tab" onclick="switchWebChart('drawdown')">📉 Drawdown</button></div></div><div class="chart-box" style="position:relative;" id="equityWebChartContainer"><canvas id="eq"></canvas><canvas id="eqSpark"></canvas><div class="eq-glow"></div></div><div class="chart-box" style="position:relative;display:none;" id="drawdownWebChartContainer"><canvas id="ddChart"></canvas></div></div><div class="card"><div class="card-title">Win/Loss Per Trade</div><div class="chart-box" style="position:relative;"><canvas id="wl"></canvas></div></div></div>
 
 <div class="bottom"><div class="card"><div class="card-title">Trade History</div><div class="table-scroll"><table><thead><tr><th>Index</th><th>Date</th><th>Entry Time</th><th>Exit Time</th><th>Dir</th><th>Strike</th><th>Entry</th><th>Exit</th><th>Charges</th><th>PnL (Net)</th><th>Reason</th></tr></thead><tbody id="tTbl"><tr><td colspan="11" class="empty">No trades yet</td></tr></tbody></table></div></div></div>
 
@@ -4484,6 +4876,16 @@ input:checked + .slider:before {
 </div>
 </div>
 <div class="refresh-bar" id="rb">Auto-refresh every 5s</div>
+<div class="bottom-right-controls">
+  <div class="live-badge"><div class="dot"></div>LIVE</div>
+  <button id="downloadBtn" class="download-btn" onclick="downloadTrades()">📥 DOWNLOAD TRADES</button>
+  <button id="resetBtn" class="reset-btn" onclick="resetTradingLog()">🔄 RESET LOGS</button>
+</div>
+<div class="soothing-clock">
+  <span class="clock-time" id="clockTime">—</span>
+  <span class="clock-divider">|</span>
+  <span class="clock-date" id="clockDate">—</span>
+</div>
 
 <!-- Broker Connection Modal -->
 <div class="modal-overlay" id="credentialsModal">
@@ -4515,6 +4917,30 @@ input:checked + .slider:before {
 </div>
 
 <script>
+// HTML escaping function for XSS protection
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function openModifyUserModalFromBtn(btn) {
+  const userId = btn.getAttribute('data-id');
+  const username = btn.getAttribute('data-username');
+  const isAdmin = btn.getAttribute('data-is-admin') === 'true';
+  openModifyUserModal(userId, username, isAdmin);
+}
+
+function deleteUserFromBtn(btn) {
+  const userId = btn.getAttribute('data-id');
+  const username = btn.getAttribute('data-username');
+  deleteUser(userId, username);
+}
+
 // Auth State Management
 let currentAuthTab = 'login';
 
@@ -4542,12 +4968,19 @@ function showDashboardScreen(username) {
   document.getElementById('authApp').style.display = 'none';
   document.getElementById('dashboardApp').style.display = 'block';
   
+  // Set theme button icon based on current state
+  const isLight = document.documentElement.classList.contains('light');
+  const themeBtn = document.getElementById('themeToggleBtn');
+  if (themeBtn) {
+    themeBtn.querySelector('.theme-icon').textContent = isLight ? '☀️' : '🌙';
+  }
+  
   // Add user badge & logout button to the header
   const hdrTitle = document.querySelector('.hdr-title');
   if (hdrTitle && !document.getElementById('userBadge')) {
     const badge = document.createElement('span');
     badge.id = 'userBadge';
-    badge.style.cssText = "font-size: 11px; background: var(--accent); color: #fff; padding: 2px 8px; border-radius: 20px; margin-left: 10px; font-weight: 700; box-shadow: 0 0 10px rgba(157, 78, 221, 0.4); text-transform: uppercase;";
+    badge.style.cssText = "font-size: 11px; background: #ebd9fc; color: #000000 !important; -webkit-text-fill-color: #000000 !important; padding: 2px 8px; border-radius: 20px; margin-left: 10px; font-weight: 800; box-shadow: 0 0 10px rgba(157, 78, 221, 0.4); text-transform: uppercase;";
     badge.textContent = username;
     hdrTitle.appendChild(badge);
     
@@ -4624,16 +5057,9 @@ async function logoutUser() {
 
 async function checkAuthStatus() {
   try {
-    const res = await fetch('/api/auth/status');
-    const d = await res.json();
-    if (d.authenticated) {
-      showDashboardScreen(d.username);
-    } else {
-      showAuthScreen();
-    }
-  } catch(e) {
-    showAuthScreen();
-  }
+    await fetch('/api/logout', { method: 'POST' });
+  } catch(e) {}
+  showAuthScreen();
 }
 
 let eqC=null, wlC=null, ddC=null;
@@ -4649,17 +5075,14 @@ function switchWebChart(type) {
     btnDd.classList.remove('active');
     boxEq.style.display = 'block';
     boxDd.style.display = 'none';
-    setTimeout(() => { boxEq.scrollLeft = 999999; }, 50);
   } else {
     btnDd.classList.add('active');
     btnEq.classList.remove('active');
     boxDd.style.display = 'block';
     boxEq.style.display = 'none';
-    setTimeout(() => { boxDd.scrollLeft = 999999; }, 50);
   }
 }
 
-let globalDhanCredentials = null;
 let globalGrowwCredentials = null;
 
 function toggleIndicesDropdown(event) {
@@ -4734,11 +5157,11 @@ function showCredentialsModal(broker, onSuccessCallback) {
   modal.onSuccess = onSuccessCallback;
   
   hdrSpan.textContent = 'Connect to GROWW';
-  desc.textContent = 'Please provide your Groww API Key and API Secret / Token to activate live trading on Groww.';
-  clientIdLabel.textContent = 'Groww API Key (Client ID)';
-  clientIdInput.placeholder = 'Enter your Groww Client ID / API Key';
-  tokenLabel.textContent = 'Access Token / API Secret';
-  tokenInput.placeholder = 'Enter your Groww Access Token / PIN';
+  desc.textContent = 'Please provide your Groww credentials. You can use either the API Key & Secret flow or the TOTP Flow (recommended - uses a 16-char secret with pyotp).';
+  clientIdLabel.textContent = 'Groww API Key / TOTP Token';
+  clientIdInput.placeholder = 'Enter your Groww API Key or TOTP Token';
+  tokenLabel.textContent = 'API Secret / TOTP Secret';
+  tokenInput.placeholder = 'Enter your API Secret or 16-character Base32 TOTP Secret';
   tokenInput.type = 'password';
   
   modal.active = true;
@@ -4765,8 +5188,7 @@ async function submitCredentials() {
   }
   
   let tokenToSend = token;
-  const isDhan = broker === 'DHAN';
-  const credentialsObj = isDhan ? globalDhanCredentials : globalGrowwCredentials;
+  const credentialsObj = globalGrowwCredentials;
   
   if (!token && credentialsObj && credentialsObj.has_token) {
     tokenToSend = 'REUSE_SAVED_TOKEN';
@@ -4774,7 +5196,7 @@ async function submitCredentials() {
   
   if (!tokenToSend) {
     errorMsg.style.color = 'var(--red)';
-    errorMsg.textContent = isDhan ? '❌ Access Token is required.' : '❌ API Secret / Token is required.';
+    errorMsg.textContent = '❌ API Secret / Token is required.';
     return;
   }
   
@@ -4794,11 +5216,7 @@ async function submitCredentials() {
       errorMsg.style.color = 'var(--green)';
       errorMsg.textContent = '✅ Connected successfully!';
       
-      if (isDhan) {
-        globalDhanCredentials = { client_id: clientId, has_token: true };
-      } else {
-        globalGrowwCredentials = { client_id: clientId, has_token: true };
-      }
+      globalGrowwCredentials = { client_id: clientId, has_token: true };
       
       setTimeout(() => {
         closeCredentialsModal();
@@ -4842,6 +5260,24 @@ async function toggleSmartFilter(enabled) {
   }
 }
 
+async function toggleAIBrain(enabled) {
+  try {
+    const r = await fetch('/api/ai_brain/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: enabled })
+    }).then(res => res.json());
+    
+    if (r.status === 'success') {
+      load();
+    } else {
+      alert("Error toggling AI Brain: " + r.message);
+    }
+  } catch(e) {
+    alert("Connection error: " + e.message);
+  }
+}
+
 async function toggleTrailingSL(enabled) {
   try {
     const r = await fetch('/api/trailing_sl/toggle', {
@@ -4860,13 +5296,107 @@ async function toggleTrailingSL(enabled) {
   }
 }
 
+function openModifyUserModal(userId, username, isAdmin) {
+  document.getElementById('modifyUserId').value = userId;
+  document.getElementById('modifyUsername').value = username;
+  document.getElementById('modifyPassword').value = '';
+  document.getElementById('modifyRole').value = isAdmin ? 'admin' : 'user';
+  document.getElementById('modifyUserModalError').textContent = '';
+  document.getElementById('modifyUserModal').style.display = 'flex';
+}
+
+function closeModifyUserModal() {
+  document.getElementById('modifyUserModal').style.display = 'none';
+}
+
+async function submitModifyUser() {
+  const userId = document.getElementById('modifyUserId').value;
+  const username = document.getElementById('modifyUsername').value.trim();
+  const password = document.getElementById('modifyPassword').value.trim();
+  const role = document.getElementById('modifyRole').value;
+  const errorDiv = document.getElementById('modifyUserModalError');
+  errorDiv.textContent = '';
+  
+  if (!username) {
+    errorDiv.textContent = 'Username is required';
+    return;
+  }
+  
+  try {
+    const res = await fetch('/api/admin/users/modify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user_id: userId,
+        username: username,
+        password: password || undefined,
+        is_admin: role === 'admin'
+      })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      closeModifyUserModal();
+      load();
+    } else {
+      errorDiv.textContent = data.message || 'Failed to modify user';
+    }
+  } catch (e) {
+    errorDiv.textContent = 'Connection error: ' + e.message;
+  }
+}
+
+async function deleteUser(userId, username) {
+  if (!confirm(`Are you absolutely sure you want to delete account "${username}"?\nThis is irreversible!`)) {
+    return;
+  }
+  try {
+    const res = await fetch('/api/admin/users/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      load();
+    } else {
+      alert("Error deleting user: " + data.message);
+    }
+  } catch(e) {
+    alert("Connection error: " + e.message);
+  }
+}
+
+async function adminToggleTrading(userId, active) {
+  try {
+    const res = await fetch('/api/admin/users/toggle_trading', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, trading_active: active ? 1 : 0 })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      load();
+    } else {
+      alert("Error toggling user trading: " + data.message);
+    }
+  } catch(e) {
+    alert("Connection error: " + e.message);
+  }
+}
+
 const fi = n => new Intl.NumberFormat('en-IN').format(Math.round(+n||0));
 const fp = n => { const v=+n||0; return (v>=0?'+':'')+'Rs.'+fi(v); };
 const pc = n => (+n||0)>=0?'g':'r';
 
 async function switchMode(targetMode) {
   if (targetMode === 'LIVE') {
-    openLiveBrokerSelection();
+    const todayStr = new Date().toISOString().split('T')[0];
+    const lastWarningDate = localStorage.getItem('liveWarningShownDate');
+    if (lastWarningDate !== todayStr) {
+      alert("⚠️ WARNING: Please make sure to use new API credentials for live trading. Do not reuse old or expired session credentials to prevent issues.");
+      localStorage.setItem('liveWarningShownDate', todayStr);
+    }
+    selectLiveBroker('GROWW');
   } else {
     if (!confirm("Switch back to DEMO Paper Trading mode?")) {
       return;
@@ -4876,14 +5406,9 @@ async function switchMode(targetMode) {
 }
 
 function openLiveBrokerSelection() {
-  document.getElementById('liveBrokerSelectModal').style.display = 'flex';
-}
-function closeLiveBrokerSelection() {
-  document.getElementById('liveBrokerSelectModal').style.display = 'none';
+  selectLiveBroker('GROWW');
 }
 async function selectLiveBroker(broker) {
-  closeLiveBrokerSelection();
-  
   const firstConfirm = confirm(`⚠️ WARNING: You are about to enable LIVE TRADING mode on ${broker}!\n\nThis will place real money orders on ${broker} for NIFTY and SENSEX options contracts. Are you absolutely sure you want to proceed?`);
   if (!firstConfirm) return;
   
@@ -4925,38 +5450,6 @@ async function activateLiveMode(targetMode) {
       load();
     } else {
       alert("Error switching mode: " + r.message);
-    }
-  } catch(e) {
-    alert("Connection error: " + e.message);
-  }
-}
-
-async function switchBroker(targetBroker) {
-  const liveModeBtn = document.getElementById('liveModeBtn');
-  const isLiveActive = liveModeBtn && liveModeBtn.classList.contains('active');
-  
-  if (isLiveActive) {
-    showCredentialsModal(targetBroker, async () => {
-      await activateBroker(targetBroker);
-    });
-    return;
-  }
-  
-  await activateBroker(targetBroker);
-}
-
-async function activateBroker(targetBroker) {
-  try {
-    const r = await fetch('/api/broker', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ broker: targetBroker })
-    }).then(res => res.json());
-    if (r.status === 'success') {
-      alert(r.message);
-      load();
-    } else {
-      alert("Error switching broker: " + r.message);
     }
   } catch(e) {
     alert("Connection error: " + e.message);
@@ -5038,8 +5531,13 @@ async function squareOffAll() {
 }
 
 function promptUpdateCapital() {
-  // Disabled by user request
-  return;
+  if (window._isLiveMode) return;
+  const modal = document.getElementById('capitalModal');
+  if (modal) {
+    document.getElementById('capitalInputVal').value = '';
+    document.getElementById('capitalModalError').textContent = '';
+    modal.style.display = 'flex';
+  }
 }
 function closeCapitalModal() {
   document.getElementById('capitalModal').style.display = 'none';
@@ -5087,8 +5585,7 @@ function downloadTrades() {
 }
 
 function resetTradingLog() {
-  // Disabled by user request
-  return;
+  showResetConfirmModal();
 }
 
 function showResetConfirmModal() {
@@ -5121,13 +5618,57 @@ async function confirmResetTradingLog() {
   }
 }
 
+function getOpenPositionRowHtml(p) {
+  const w = +p.pnl >= 0;
+  const idxColors = {
+    'NIFTY': 'var(--blue)', 'SENSEX': 'var(--gold)', 'BANKNIFTY': '#ff4757',
+    'FINNIFTY': '#2ed573', 'MIDCPNIFTY': '#1e90ff', 'BANKEX': '#ffa502'
+  };
+  const idxColor = idxColors[p.index] || '#ff00e4';
+  const idx = `<span style="color:${idxColor};font-weight:700">${p.index}</span>`;
+  const chgVal = p.charges ? 'Rs.' + fi(p.charges) : '—';
+  const maxLoss = Math.round((p.entry - p.sl) * p.contracts);
+  const maxProfit = Math.round((p.tp - p.entry) * p.contracts);
+  const dirClass = (p.opt || p.direction || '').toUpperCase() === 'CE' ? 'call' : 'put';
+  const contractLabel = p.contract_sym || `${p.index} ${p.strike}${p.opt}`;
+  const expiryLabel = p.expiry || '—';
+  const ltpColor = (+p.cur >= +p.entry) ? 'var(--green)' : 'var(--red)';
+  return `<tr data-tid="${p.tid}">
+    <td>${idx}</td>
+    <td style="font-size:10px;color:#c7d2fe;font-weight:700;font-family:'JetBrains Mono',monospace;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${contractLabel}">${contractLabel}</td>
+    <td class="m" style="font-size:10px;">${expiryLabel}</td>
+    <td class="m">${p.entry_time}</td>
+    <td><span class="badge ${dirClass}">${p.opt || p.direction}</span></td>
+    <td>${p.contracts} (${p.lots}L)</td>
+    <td>Rs.${p.entry}</td>
+    <td class="pos-ltp" style="color:${ltpColor};font-weight:700">Rs.${p.cur}</td>
+    <td class="m">
+      <div style="display:flex;align-items:center;gap:6px;justify-content:center;">
+        <span style="font-size:11px;color:var(--muted)">SL:</span>
+        <input type="number" step="0.1" value="${p.sl}" id="sl-${p.tid}" style="width:48px;background:rgba(255,255,255,0.05);border:1px solid var(--border);border-radius:4px;color:#fff;padding:2px 4px;font-size:11px;font-family:monospace;text-align:center;">
+        <span style="font-size:11px;color:var(--muted)">TP:</span>
+        <input type="number" step="0.1" value="${p.tp}" id="tp-${p.tid}" style="width:48px;background:rgba(255,255,255,0.05);border:1px solid var(--border);border-radius:4px;color:#fff;padding:2px 4px;font-size:11px;font-family:monospace;text-align:center;">
+        <label style="display:flex;align-items:center;gap:3px;cursor:pointer;user-select:none;font-size:11px;color:#00f0ff;" title="Use Trailing Stop Loss">
+          <input type="checkbox" id="tsl-${p.tid}" ${p.trailing_sl_enabled ? 'checked' : ''} style="cursor:pointer;accent-color:#00f0ff;">
+          <span>TSL</span>
+        </label>
+        <button onclick="updateSlTp('${p.tid}')" style="background:#ff9f43;border:none;border-radius:4px;color:#000;padding:2px 6px;font-size:10px;font-weight:700;cursor:pointer;transition:all 0.2s;" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter='none'">✏️</button>
+        <button onclick="squareoffPosition('${p.tid}', '${contractLabel}', ${p.contracts}, ${p.cur})" style="background:#ff4757;border:none;border-radius:4px;color:#fff;padding:2px 6px;font-size:10px;font-weight:700;cursor:pointer;transition:all 0.2s;margin-left:4px;" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter='none'">❌ Exit</button>
+      </div>
+    </td>
+    <td class="pos-targets m" style="line-height:1.45; text-align:center;">
+      <div style="font-weight:700;"><span class="r">-₹${fi(maxLoss)}</span></div>
+      <div style="font-weight:700;"><span class="g">+₹${fi(maxProfit)}</span></div>
+    </td>
+    <td class="m" style="cursor:pointer;text-decoration:underline;color:var(--blue);" onclick="showChargesDetails('${p.tid} Position', ${p.brokerage}, ${p.gst}, ${p.stt}, ${p.stamp_duty}, ${p.exchange_charges}, ${p.sebi_fee}, ${p.charges})">${chgVal}</td>
+    <td class="pos-pnl ${w?'g':'r'}" style="font-weight:700;font-size:12px;">${fp(p.pnl)} (${(p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct.toFixed(2)}%)</td>
+  </tr>`;
+}
+
 async function load(){
   try{
     const d = await fetch('/api/data').then(r=>r.json());
     window.lastLoadedData = d;
-    if (d.dhan_credentials) {
-      globalDhanCredentials = d.dhan_credentials;
-    }
     if (d.groww_credentials) {
       globalGrowwCredentials = d.groww_credentials;
     }
@@ -5181,16 +5722,9 @@ async function load(){
     const hdrSub = document.getElementById('hdrSub');
     
     // Update Broker Selector UI
-    const dhanBrokerBtn = document.getElementById('dhanBrokerBtn');
     const growwBrokerBtn = document.getElementById('growwBrokerBtn');
-    if (dhanBrokerBtn && growwBrokerBtn) {
-      if (d.active_broker === 'GROWW') {
-        dhanBrokerBtn.classList.remove('active');
-        growwBrokerBtn.classList.add('active');
-      } else {
-        growwBrokerBtn.classList.remove('active');
-        dhanBrokerBtn.classList.add('active');
-      }
+    if (growwBrokerBtn) {
+      growwBrokerBtn.classList.add('active');
     }
 
     // Capital card — disable click-to-update in live mode
@@ -5200,11 +5734,7 @@ async function load(){
       demoModeBtn.classList.remove('active');
       liveModeBtn.classList.add('active');
       if (capCard) { capCard.style.cursor = 'default'; capCard.title = 'Live broker balance (read-only)'; }
-      if (d.active_broker === 'GROWW') {
-        hdrSub.innerHTML = '<span style="color:#7c4dff;font-weight:700;text-shadow:0 0 10px rgba(124, 77, 255, 0.45)">⚡ LIVE · REAL MONEY GROWW TRADING</span>';
-      } else {
-        hdrSub.innerHTML = '<span style="color:#ff6e00;font-weight:700;animation:livePulse 2s infinite">⚡ LIVE · REAL MONEY DHAN TRADING</span>';
-      }
+      hdrSub.innerHTML = '<span style="color:#7c4dff;font-weight:700;text-shadow:0 0 10px rgba(124, 77, 255, 0.45)">⚡ LIVE · REAL MONEY GROWW TRADING</span>';
     } else {
       window._isLiveMode = false;
       liveModeBtn.classList.remove('active');
@@ -5247,16 +5777,22 @@ async function load(){
       const smart = d.smart_status;
       const toggleInput = document.getElementById('smartToggleInput');
       if (toggleInput) {
-        toggleInput.checked = smart.enabled;
+        toggleInput.checked = d.smart_filter_enabled;
       }
       
       const smartStat = document.getElementById('smartStatus');
       if (smartStat) {
-        smartStat.textContent = smart.status;
-        if (smart.status.includes("ACTIVE") || smart.status.includes("PROTECTED")) {
-          smartStat.style.color = "var(--green)";
-          smartStat.style.textShadow = "0 0 8px rgba(0, 255, 136, 0.3)";
+        if (d.smart_filter_enabled) {
+          smartStat.textContent = smart.status;
+          if (smart.status.includes("ACTIVE") || smart.status.includes("PROTECTED")) {
+            smartStat.style.color = "var(--green)";
+            smartStat.style.textShadow = "0 0 8px rgba(0, 255, 136, 0.3)";
+          } else {
+            smartStat.style.color = "#ff9f43";
+            smartStat.style.textShadow = "0 0 8px rgba(255, 159, 67, 0.3)";
+          }
         } else {
+          smartStat.textContent = "DISABLED";
           smartStat.style.color = "#ff9f43";
           smartStat.style.textShadow = "0 0 8px rgba(255, 159, 67, 0.3)";
         }
@@ -5268,61 +5804,170 @@ async function load(){
       document.getElementById('smartFiltered').textContent = smart.filtered_count + ' Blocked';
     }
     
+    // Update AI Brain Card
+    if (d.ai_brain) {
+      const aiToggle = document.getElementById('aiToggleInput');
+      if (aiToggle) {
+        aiToggle.checked = d.ai_brain_enabled;
+      }
+      
+      const aiStat = document.getElementById('aiStatus');
+      if (aiStat) {
+        if (d.ai_brain_enabled) {
+          aiStat.textContent = d.ai_brain.trained ? "ACTIVE" : "LEARNING";
+          aiStat.style.color = "var(--green)";
+        } else {
+          aiStat.textContent = "DISABLED";
+          aiStat.style.color = "#ff9f43";
+        }
+      }
+      
+      const aiSamp = document.getElementById('aiSamples');
+      if (aiSamp) aiSamp.textContent = d.ai_brain.samples;
+      
+      const aiAcc = document.getElementById('aiAccuracy');
+      if (aiAcc) aiAcc.textContent = d.ai_brain.accuracy + "%";
+    }
+
+    // Show/Hide admin-only cards based on admin status
+    const smartCard = document.querySelector('.smart-card');
+    const aiCard = document.querySelector('.ai-card');
+    const userMgmtCard = document.getElementById('userMgmtCard');
+    
+    if (d.is_admin) {
+      if (smartCard) smartCard.style.display = 'block';
+      if (aiCard) aiCard.style.display = 'block';
+      if (userMgmtCard) {
+        userMgmtCard.style.display = 'block';
+        if (d.users_list) {
+          const tbody = document.getElementById('userMgmtTbody');
+          if (tbody) {
+            tbody.innerHTML = d.users_list.map(u => {
+              const isSelf = u.id === d.user_id;
+              const safeUsername = escapeHtml(u.username);
+              const safePasswordPlain = escapeHtml(u.password_plain);
+              const statusSpan = u.trading_active 
+                ? `<span style="color:var(--green);font-weight:700;">🟢 RUNNING</span>` 
+                : `<span style="color:var(--muted);font-weight:700;">⚪ PAUSED</span>`;
+              const statusBtn = u.trading_active 
+                ? `<button onclick="adminToggleTrading(${u.id}, false)" style="background:rgba(255, 0, 127, 0.1); border:1.5px solid rgba(255, 0, 127, 0.4); border-radius:6px; color:var(--red); font-size:10px; font-weight:800; cursor:pointer; padding:3px 8px; margin-left:8px; font-family:'Inter',sans-serif; transition:all 0.2s;" onmouseover="this.style.background='rgba(255, 0, 127, 0.2)'" onmouseout="this.style.background='rgba(255, 0, 127, 0.1)'">🛑 STOP</button>`
+                : `<button onclick="adminToggleTrading(${u.id}, true)" style="background:rgba(0, 255, 136, 0.1); border:1.5px solid rgba(0, 255, 136, 0.4); border-radius:6px; color:var(--green); font-size:10px; font-weight:800; cursor:pointer; padding:3px 8px; margin-left:8px; font-family:'Inter',sans-serif; transition:all 0.2s;" onmouseover="this.style.background='rgba(0, 255, 136, 0.2)'" onmouseout="this.style.background='rgba(0, 255, 136, 0.1)'">▶️ START</button>`;
+                
+              const deleteBtn = isSelf 
+                ? `<span style="color:var(--muted);font-size:11px;">(Self)</span>` 
+                : `<button data-id="${u.id}" data-username="${safeUsername}" onclick="deleteUserFromBtn(this)" style="background:rgba(255, 0, 127, 0.1); border:1.5px solid rgba(255, 0, 127, 0.4); border-radius:6px; color:var(--red); font-size:10px; font-weight:800; cursor:pointer; padding:3px 8px; font-family:'Inter',sans-serif; transition:all 0.2s;" onmouseover="this.style.background='rgba(255, 0, 127, 0.2)'" onmouseout="this.style.background='rgba(255, 0, 127, 0.1)'">❌ DELETE</button>`;
+                
+              const activeSpan = u.active_today 
+                ? `<span style="color:var(--green);font-weight:700;">🟢 ACTIVE</span>` 
+                : `<span style="color:var(--red);font-weight:700;">🔴 INACTIVE</span>`;
+                
+              const hasGrowwConnected = !!u.groww_client_id;
+              const liveBrokerSpan = hasGrowwConnected 
+                ? `<div style="display:flex;flex-direction:column;">
+                     <span style="color:var(--green);font-weight:700;font-size:10.5px;">🔌 CONNECTED</span>
+                     <span style="font-size:9px;color:var(--muted);margin-top:2px;">Mode: ${u.live_trading ? '<span style="color:#00f0ff;font-weight:800;letter-spacing:0.5px;">LIVE</span>' : '<span style="color:var(--muted);font-weight:800;letter-spacing:0.5px;">DEMO</span>'}</span>
+                   </div>`
+                : `<span style="color:var(--muted);font-weight:700;font-size:10.5px;">⚪ NOT CONNECTED</span>`;
+                
+              return `
+              <tr>
+                <td style="font-family:'JetBrains Mono',monospace;font-weight:700;color:#ebd9fc;padding:8px;">${safeUsername}</td>
+                <td style="font-family:'JetBrains Mono',monospace;color:#00f0ff;font-weight:700;padding:8px;">${safePasswordPlain || '—'}</td>
+                <td style="padding:8px;"><span class="badge ${u.is_admin ? 'call' : 'put'}">${u.is_admin ? 'ADMIN' : 'USER'}</span></td>
+                <td style="font-size:11px;color:var(--muted);padding:8px;">${u.created_at || '—'}</td>
+                <td style="padding:8px;">
+                  <div style="display:flex;flex-direction:column;">
+                    ${activeSpan}
+                    <span style="font-size:9.5px;color:var(--muted);margin-top:2px;">Last: ${u.last_login_at || 'Never'}</span>
+                  </div>
+                </td>
+                <td style="padding:8px;">
+                  ${liveBrokerSpan}
+                </td>
+                <td style="padding:8px;">
+                  <div style="display:flex;align-items:center;">
+                    ${statusSpan} ${statusBtn}
+                  </div>
+                </td>
+                <td style="padding:8px;">
+                  <button data-id="${u.id}" data-username="${safeUsername}" data-is-admin="${u.is_admin}" onclick="openModifyUserModalFromBtn(this)" style="background:rgba(0, 240, 255, 0.1); border:1.5px solid rgba(0, 240, 255, 0.4); border-radius:6px; color:#00f0ff; font-size:10px; font-weight:800; cursor:pointer; padding:3px 8px; font-family:'Inter',sans-serif; transition:all 0.2s; margin-right:6px;" onmouseover="this.style.background='rgba(0, 240, 255, 0.2)'" onmouseout="this.style.background='rgba(0, 240, 255, 0.1)'">✏️ EDIT</button>
+                  ${deleteBtn}
+                </td>
+              </tr>
+            `}).join('');
+          }
+        }
+      }
+    } else {
+      if (smartCard) smartCard.style.display = 'none';
+      if (aiCard) aiCard.style.display = 'none';
+      if (userMgmtCard) userMgmtCard.style.display = 'none';
+    }
+    
     // Open positions handling
     const opc = document.getElementById('openPosCard');
     const ot = document.getElementById('openTbl');
     const ac = document.getElementById('activeCount');
     if (!d.open_positions || !d.open_positions.length) {
       opc.style.display = 'none';
+      ot.innerHTML = '';
     } else {
       opc.style.display = 'block';
       ac.textContent = d.open_positions.length + ' ACTIVE';
-      ot.innerHTML = d.open_positions.map(p => {
-    const w = +p.pnl >= 0;
-        const idxColors = {
-          'NIFTY': 'var(--blue)', 'SENSEX': 'var(--gold)', 'BANKNIFTY': '#ff4757',
-          'FINNIFTY': '#2ed573', 'MIDCPNIFTY': '#1e90ff', 'BANKEX': '#ffa502'
-        };
-        const idxColor = idxColors[p.index] || '#ff00e4';
-        const idx = `<span style="color:${idxColor};font-weight:700">${p.index}</span>`;
-        const chgVal = p.charges ? 'Rs.' + fi(p.charges) : '—';
-        const maxLoss = Math.round((p.entry - p.sl) * p.contracts);
-        const maxProfit = Math.round((p.tp - p.entry) * p.contracts);
-        const dirClass = (p.opt || p.direction || '').toUpperCase() === 'CE' ? 'call' : 'put';
-        const contractLabel = p.contract_sym || `${p.index} ${p.strike}${p.opt}`;
-        const expiryLabel = p.expiry || '—';
-        const ltpColor = (+p.cur >= +p.entry) ? 'var(--green)' : 'var(--red)';
-        return `<tr>
-          <td>${idx}</td>
-          <td style="font-size:10px;color:#c7d2fe;font-weight:700;font-family:'JetBrains Mono',monospace;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${contractLabel}">${contractLabel}</td>
-          <td class="m" style="font-size:10px;">${expiryLabel}</td>
-          <td class="m">${p.entry_time}</td>
-          <td><span class="badge ${dirClass}">${p.opt || p.direction}</span></td>
-          <td>${p.contracts} (${p.lots}L)</td>
-          <td>Rs.${p.entry}</td>
-          <td style="color:${ltpColor};font-weight:700">Rs.${p.cur}</td>
-          <td class="m">
-            <div style="display:flex;align-items:center;gap:6px;justify-content:center;">
-              <span style="font-size:11px;color:var(--muted)">SL:</span>
-              <input type="number" step="0.1" value="${p.sl}" id="sl-${p.tid}" style="width:48px;background:rgba(255,255,255,0.05);border:1px solid var(--border);border-radius:4px;color:#fff;padding:2px 4px;font-size:11px;font-family:monospace;text-align:center;">
-              <span style="font-size:11px;color:var(--muted)">TP:</span>
-              <input type="number" step="0.1" value="${p.tp}" id="tp-${p.tid}" style="width:48px;background:rgba(255,255,255,0.05);border:1px solid var(--border);border-radius:4px;color:#fff;padding:2px 4px;font-size:11px;font-family:monospace;text-align:center;">
-              <label style="display:flex;align-items:center;gap:3px;cursor:pointer;user-select:none;font-size:11px;color:#00f0ff;" title="Use Trailing Stop Loss">
-                <input type="checkbox" id="tsl-${p.tid}" ${p.trailing_sl_enabled ? 'checked' : ''} style="cursor:pointer;accent-color:#00f0ff;">
-                <span>TSL</span>
-              </label>
-              <button onclick="updateSlTp('${p.tid}')" style="background:#ff9f43;border:none;border-radius:4px;color:#000;padding:2px 6px;font-size:10px;font-weight:700;cursor:pointer;transition:all 0.2s;" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter='none'">✏️</button>
-              <button onclick="squareoffPosition('${p.tid}', '${contractLabel}', ${p.contracts}, ${p.cur})" style="background:#ff4757;border:none;border-radius:4px;color:#fff;padding:2px 6px;font-size:10px;font-weight:700;cursor:pointer;transition:all 0.2s;margin-left:4px;" onmouseover="this.style.filter='brightness(1.1)'" onmouseout="this.style.filter='none'">❌ Exit</button>
-            </div>
-          </td>
-          <td class="m" style="line-height:1.45; text-align:center;">
-            <div style="font-weight:700;"><span class="r">-₹${fi(maxLoss)}</span></div>
-            <div style="font-weight:700;"><span class="g">+₹${fi(maxProfit)}</span></div>
-          </td>
-          <td class="m" style="cursor:pointer;text-decoration:underline;color:var(--blue);" onclick="showChargesDetails('${p.tid} Position', ${p.brokerage}, ${p.gst}, ${p.stt}, ${p.stamp_duty}, ${p.exchange_charges}, ${p.sebi_fee}, ${p.charges})">${chgVal}</td>
-          <td class="${w?'g':'r'}" style="font-weight:700;font-size:12px;">${fp(p.pnl)} (${(p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct.toFixed(2)}%)</td>
-        </tr>`;
-      }).join('');
+      
+      const currentRows = ot.querySelectorAll('tr[data-tid]');
+      const currentTids = Array.from(currentRows).map(tr => tr.getAttribute('data-tid'));
+      const newTids = d.open_positions.map(p => String(p.tid));
+      
+      const isIdentical = currentTids.length === newTids.length && currentTids.every((tid, idx) => tid === newTids[idx]);
+      
+      if (isIdentical) {
+        d.open_positions.forEach(p => {
+          const tr = ot.querySelector(`tr[data-tid="${p.tid}"]`);
+          if (tr) {
+            const ltpColor = (+p.cur >= +p.entry) ? 'var(--green)' : 'var(--red)';
+            const ltpCell = tr.querySelector('.pos-ltp');
+            if (ltpCell) {
+              ltpCell.textContent = `Rs.${p.cur}`;
+              ltpCell.style.color = ltpColor;
+            }
+            
+            const w = +p.pnl >= 0;
+            const pnlCell = tr.querySelector('.pos-pnl');
+            if (pnlCell) {
+              pnlCell.textContent = `${fp(p.pnl)} (${(p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct.toFixed(2)}%)`;
+              pnlCell.className = `pos-pnl ${w ? 'g' : 'r'}`;
+            }
+            
+            const maxLoss = Math.round((p.entry - p.sl) * p.contracts);
+            const maxProfit = Math.round((p.tp - p.entry) * p.contracts);
+            const targetsCell = tr.querySelector('.pos-targets');
+            if (targetsCell) {
+              targetsCell.innerHTML = `
+                <div style="font-weight:700;"><span class="r">-₹${fi(maxLoss)}</span></div>
+                <div style="font-weight:700;"><span class="g">+₹${fi(maxProfit)}</span></div>
+              `;
+            }
+            
+            const slInput = document.getElementById(`sl-${p.tid}`);
+            if (slInput && document.activeElement !== slInput) {
+              slInput.value = p.sl;
+            }
+            
+            const tpInput = document.getElementById(`tp-${p.tid}`);
+            if (tpInput && document.activeElement !== tpInput) {
+              tpInput.value = p.tp;
+            }
+            
+            const tslInput = document.getElementById(`tsl-${p.tid}`);
+            if (tslInput && document.activeElement !== tslInput) {
+              tslInput.checked = !!p.trailing_sl_enabled;
+            }
+          }
+        });
+      } else {
+        ot.innerHTML = d.open_positions.map(getOpenPositionRowHtml).join('');
+      }
     }
     
     const formatTime = ts => {
@@ -5345,7 +5990,7 @@ async function load(){
       const color = idxColors[idx] || '#ff00e4';
       const idxBadge=`<span style="color:${color};font-size:9px;font-weight:700">${idx}</span>`;
       const chg = t.charges ? 'Rs.' + fi(t.charges) : '—';
-      return `<tr><td>${idxBadge}</td><td class="m">${t.date||''}</td><td class="m">${formatTime(t.entry_time)}</td><td class="m">${formatTime(t.exit_time)}</td><td><span class="badge ${(t.direction||'').toLowerCase()}">${t.direction||''}</span></td><td>${t.strike||''}${t.opt||''}<div style="font-size:9px;color:rgba(255,255,255,0.45);font-family:monospace;margin-top:2px;">Exp: ${t.expiry||'—'}</div></td><td>Rs.${t.entry||0}</td><td>${t.exit?'Rs.'+t.exit:'—'}</td><td class="m" style="cursor:pointer;text-decoration:underline;color:var(--blue);" onclick="showChargesDetails('${t.tid} Realized', ${t.brokerage||0}, ${t.gst||0}, ${t.stt||0}, ${t.stamp_duty||0}, ${t.exchange_charges||0}, ${t.sebi_fee||0}, ${t.charges||0})">${chg}</td><td class="${w?'g':'r'}">${fp(t.pnl)}</td><td class="m">${(t.reason||'').replace(/_/g,' ')}</td></tr>`;
+      return `<tr><td>${idxBadge}</td><td class="m">${t.date||''}</td><td class="m">${formatTime(t.entry_time)}</td><td class="m">${formatTime(t.exit_time)}</td><td><span class="badge ${(t.direction||'').toLowerCase()}">${t.direction||''}</span></td><td>${t.strike||''}${t.opt||''}<div style="font-size:9px;color:rgba(255,255,255,0.45);font-family:monospace;margin-top:2px;">Exp: ${t.expiry||'—'}</div></td><td>Rs.${t.entry||0}</td><td>${t.exit?'Rs.'+t.exit:'—'}</td><td class="m" style="cursor:pointer;text-decoration:underline;color:var(--blue);" onclick="showChargesDetails('${t.tid} Realized', ${t.brokerage||0}, ${t.gst||0}, ${t.stt||0}, ${t.stamp_duty||0}, ${t.exchange_charges||0}, ${t.sebi_fee||0}, ${t.charges||0})">${chg}</td><td class="${w?'g':'r'}">${fp(t.pnl)}</td><td class="m">${escapeHtml((t.reason||'').replace(/_/g,' '))}</td></tr>`;
     };
     if(!d.trades||!d.trades.length){
       tb.innerHTML='<tr><td colspan="11" class="empty">No trades yet</td></tr>';
@@ -5356,7 +6001,7 @@ async function load(){
     const indexRow = t => {
       const w=+t.pnl>0;
       const chg = t.charges ? 'Rs.' + fi(t.charges) : '—';
-      return `<tr><td class="m">${formatTime(t.entry_time)}</td><td class="m">${formatTime(t.exit_time)}</td><td><span class="badge ${(t.direction||'').toLowerCase()}">${t.direction||''}</span></td><td>${t.strike||''}${t.opt||''}<div style="font-size:9px;color:rgba(255,255,255,0.45);font-family:monospace;margin-top:2px;">Exp: ${t.expiry||'—'}</div></td><td>Rs.${t.entry||0}</td><td>${t.exit?'Rs.'+t.exit:'—'}</td><td class="m" style="cursor:pointer;text-decoration:underline;color:var(--blue);" onclick="showChargesDetails('${t.tid} Realized', ${t.brokerage||0}, ${t.gst||0}, ${t.stt||0}, ${t.stamp_duty||0}, ${t.exchange_charges||0}, ${t.sebi_fee||0}, ${t.charges||0})">${chg}</td><td class="${w?'g':'r'}">${fp(t.pnl)}</td><td class="m">${(t.reason||'').replace(/_/g,' ')}</td></tr>`;
+      return `<tr><td class="m">${formatTime(t.entry_time)}</td><td class="m">${formatTime(t.exit_time)}</td><td><span class="badge ${(t.direction||'').toLowerCase()}">${t.direction||''}</span></td><td>${t.strike||''}${t.opt||''}<div style="font-size:9px;color:rgba(255,255,255,0.45);font-family:monospace;margin-top:2px;">Exp: ${t.expiry||'—'}</div></td><td>Rs.${t.entry||0}</td><td>${t.exit?'Rs.'+t.exit:'—'}</td><td class="m" style="cursor:pointer;text-decoration:underline;color:var(--blue);" onclick="showChargesDetails('${t.tid} Realized', ${t.brokerage||0}, ${t.gst||0}, ${t.stt||0}, ${t.stamp_duty||0}, ${t.exchange_charges||0}, ${t.sebi_fee||0}, ${t.charges||0})">${chg}</td><td class="${w?'g':'r'}">${fp(t.pnl)}</td><td class="m">${escapeHtml((t.reason||'').replace(/_/g,' '))}</td></tr>`;
     };
     const allTrades=d.trades||[];
     
@@ -5401,13 +6046,7 @@ async function load(){
     
     if (d.trading_indices) {
       d.trading_indices.forEach(idx => {
-        const displayName = idx === 'NIFTY' ? 'ALGO TRADING' : idx;
-        const idxTrades = allTrades.filter(t => {
-          if (idx === 'NIFTY') {
-            return (t.tid || '').startsWith('ALGO_TRADING') || (t.tid || '').startsWith('NIFTY_DEEP_ALGO') || (t.tid || '').startsWith('NIFTY');
-          }
-          return (t.tid || '').startsWith(idx);
-        });
+        const idxTrades = allTrades.filter(t => (t.index_name || '').toUpperCase() === idx.toUpperCase());
         const idxPnl = idxTrades.reduce((s, t) => s + (+t.pnl || 0), 0);
         const pnlEl = document.getElementById(`${idx.toLowerCase()}Pnl`);
         if (pnlEl) {
@@ -5425,19 +6064,6 @@ async function load(){
     const labels=(d.equity||[]).map((_,i)=>'#'+(i+1));
     const eqData=d.equity||[];
     const pnls=(d.trades||[]).map(t=>+t.pnl);
-
-    // Dynamic width calculation to show at least 10 trades before scrolling horizontally
-    const scrollWidth = `max(100%, ${N * 55}px)`;
-    document.getElementById('eqWrapper').style.width = scrollWidth;
-    document.getElementById('ddWrapper').style.width = scrollWidth;
-    document.getElementById('wlWrapper').style.width = scrollWidth;
-
-    // Auto-scroll to show the latest trades first
-    setTimeout(() => {
-        document.getElementById('equityWebChartContainer').scrollLeft = 999999;
-        document.getElementById('drawdownWebChartContainer').scrollLeft = 999999;
-        document.getElementById('wlChartContainer').scrollLeft = 999999;
-    }, 150);
     // 3D Equity chart
     const lastVal=eqData.length?eqData[eqData.length-1]:0;
     if(eqC){eqC.destroy();eqC=null;}
@@ -5646,7 +6272,9 @@ async function load(){
         }
       }
     });
+    updateChartColors();
     lastStats = d.stats;
+    document.getElementById('rb').textContent = '✓ Updated ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   } catch(e){ document.getElementById('rb').textContent = 'Error'; }
 }
 let lastStats = null;
@@ -5681,9 +6309,13 @@ async function updateSlTp(tid) {
 
 async function squareoffPosition(tid, contractLabel, contracts, ltp) {
   const label = contractLabel || tid;
-  const ltpStr = ltp ? ` @ Rs.${ltp}` : '';
+  const pos = (window.lastLoadedData && window.lastLoadedData.open_positions) 
+              ? window.lastLoadedData.open_positions.find(p => p.tid === tid) 
+              : null;
+  const currentLtp = pos ? pos.cur : ltp;
+  const ltpStr = currentLtp ? ` @ Rs.${currentLtp}` : '';
   const qtyStr = contracts ? ` (${contracts} contracts)` : '';
-  if (!confirm(`⚠️ SQUARE OFF CONFIRMATION\n\nContract: ${label}${qtyStr}\nCurrent LTP: Rs.${ltp || '—'}\n\nAre you sure you want to EXIT this position now on Groww?\nThis will place a live SELL order at market price.`)) {
+  if (!confirm(`⚠️ SQUARE OFF CONFIRMATION\n\nContract: ${label}${qtyStr}\nCurrent LTP: Rs.${currentLtp || '—'}\n\nAre you sure you want to EXIT this position now on Groww?\nThis will place a live SELL order at market price.`)) {
     return;
   }
   try {
@@ -5707,7 +6339,7 @@ function showChargesDetails(label, brokerage, gst, stt, stamp_duty, exchange_cha
   const modal = document.getElementById('chargesModal');
   const body = document.getElementById('modalBody');
   body.innerHTML = `
-    <div style="font-size:11.5px; color:var(--muted); margin-bottom:8px;">Scope: <span style="color:#ff9f43; font-weight:700;">${label}</span></div>
+    <div style="font-size:11.5px; color:var(--muted); margin-bottom:8px;">Scope: <span style="color:#ff9f43; font-weight:700;">${escapeHtml(label)}</span></div>
     <div style="display:flex; justify-content:space-between; border-bottom:1px solid rgba(255,255,255,0.04); padding:8px 0;">
       <span style="font-size:12.5px; color:#c7d2fe;">Commission Brokerage</span>
       <span style="font-family:'JetBrains Mono',monospace; font-size:12.5px; font-weight:700; color:#fff;">Rs.${brokerage.toFixed(2)}</span>
@@ -5759,7 +6391,6 @@ function showOverallCharges() {
 window.onclick = function(event) {
   const modal = document.getElementById('chargesModal');
   const capModal = document.getElementById('capitalModal');
-  const brokerSelectModal = document.getElementById('liveBrokerSelectModal');
   const resetConfirmModal = document.getElementById('resetConfirmModal');
   const sqModal = document.getElementById('squareoffSelectModal');
   if (event.target == modal) {
@@ -5767,9 +6398,6 @@ window.onclick = function(event) {
   }
   if (event.target == capModal) {
     capModal.style.display = 'none';
-  }
-  if (event.target == brokerSelectModal) {
-    brokerSelectModal.style.display = 'none';
   }
   if (event.target == resetConfirmModal) {
     resetConfirmModal.style.display = 'none';
@@ -5834,7 +6462,7 @@ function updateSquareoffModalDetails() {
       const pnlVal = +p.pnl >= 0;
       const pnlColor = pnlVal ? 'var(--green)' : 'var(--red)';
       const pnlSign = +p.pnl >= 0 ? '+' : '';
-      const contractLabel = p.contract_sym || `${p.index} ${p.strike}${p.opt}`;
+      const contractLabel = escapeHtml(p.contract_sym || `${p.index} ${p.strike}${p.opt}`);
       
       container.innerHTML = `
         <div style="display: flex; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.04); padding-bottom: 8px;">
@@ -5917,6 +6545,405 @@ async function executeSquareoffFromModal() {
   }
 }
 
+function updateSoothingClock() {
+  const timeEl = document.getElementById('clockTime');
+  const dateEl = document.getElementById('clockDate');
+  if (!timeEl || !dateEl) return;
+
+  const now = new Date();
+  
+  // Format Time: HH:MM:SS AM/PM
+  let hours = now.getHours();
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const seconds = String(now.getSeconds()).padStart(2, '0');
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  hours = hours % 12;
+  hours = hours ? hours : 12;
+  const formattedHours = String(hours).padStart(2, '0');
+  
+  timeEl.textContent = `${formattedHours}:${minutes}:${seconds} ${ampm}`;
+
+  // Format Date: Day, DD MMM YYYY (e.g. Sun, 07 Jun 2026)
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  
+  const dayName = days[now.getDay()];
+  const dayVal = String(now.getDate()).padStart(2, '0');
+  const monthName = months[now.getMonth()];
+  const year = now.getFullYear();
+  
+  dateEl.textContent = `${dayName}, ${dayVal} ${monthName} ${year}`;
+}
+// Start soothing clock
+setInterval(updateSoothingClock, 1000);
+updateSoothingClock();
+
+// --- MANUAL TRADING JS ---
+let currentChainData = null;
+let manualTradeInterval = null;
+
+function openManualTradeModal() {
+  document.getElementById('manualTradeModal').style.display = 'flex';
+  
+  const select = document.getElementById('mtIndexSelect');
+  if (select.children.length === 0) {
+    const indices = ["NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "BANKEX"];
+    indices.forEach(idx => {
+      const opt = document.createElement('option');
+      opt.value = idx;
+      opt.textContent = idx;
+      select.appendChild(opt);
+    });
+  }
+  
+  document.getElementById('mtModalError').textContent = '';
+  document.getElementById('mtLotsInput').value = '1';
+  
+  loadManualTradeChain(true);
+  
+  if (!manualTradeInterval) {
+    manualTradeInterval = setInterval(() => {
+      if (document.getElementById('manualTradeModal').style.display === 'flex') {
+        loadManualTradeChain(false);
+      }
+    }, 4000);
+  }
+}
+
+function closeManualTradeModal() {
+  document.getElementById('manualTradeModal').style.display = 'none';
+  if (manualTradeInterval) {
+    clearInterval(manualTradeInterval);
+    manualTradeInterval = null;
+  }
+}
+
+async function loadManualTradeChain(clearTable = true) {
+  const select = document.getElementById('mtIndexSelect');
+  if (!select) return;
+  const index = select.value;
+  const errorEl = document.getElementById('mtModalError');
+  const tbody = document.getElementById('mtOptionChainBody');
+  
+  if (clearTable) {
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:20px; color:var(--muted); font-size:13px;">⏳ Loading option chain data...</td></tr>';
+    errorEl.textContent = '';
+    document.getElementById('mtSpotPrice').textContent = '—';
+    document.getElementById('mtExpiryDate').textContent = '—';
+  }
+  
+  try {
+    const r = await fetch(`/api/option_chain/${index}`).then(res => res.json());
+    if (r.status === 'success') {
+      currentChainData = r;
+      renderManualTradeChain(clearTable);
+    } else {
+      if (clearTable) {
+        tbody.innerHTML = '';
+        errorEl.textContent = '❌ ' + r.message;
+      }
+    }
+  } catch(e) {
+    if (clearTable) {
+      tbody.innerHTML = '';
+      errorEl.textContent = '❌ Connection error: ' + e.message;
+    }
+  }
+}
+
+function renderManualTradeChain(clearTable = true) {
+  if (!currentChainData) return;
+  const { spot, expiry, records, lot_size } = currentChainData;
+  document.getElementById('mtSpotPrice').textContent = spot.toFixed(2);
+  document.getElementById('mtExpiryDate').textContent = expiry;
+  
+  const tbody = document.getElementById('mtOptionChainBody');
+  const errorEl = document.getElementById('mtModalError');
+  
+  if (clearTable) {
+    tbody.innerHTML = '';
+    if (records.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:20px; color:var(--muted);">No strikes available around spot.</td></tr>';
+      return;
+    }
+    
+    let minDiff = Infinity;
+    let atmStrike = null;
+    records.forEach(r => {
+      const diff = Math.abs(r.strike - spot);
+      if (diff < minDiff) {
+        minDiff = diff;
+        atmStrike = r.strike;
+      }
+    });
+    
+    records.forEach(r => {
+      const tr = document.createElement('tr');
+      tr.style.borderBottom = '1px solid rgba(255,255,255,0.04)';
+      tr.style.transition = 'background 0.2s';
+      tr.onmouseover = () => { tr.style.background = 'rgba(255,255,255,0.01)'; };
+      tr.onmouseout = () => { tr.style.background = 'transparent'; };
+      
+      const isATM = r.strike === atmStrike;
+      const strikeStyle = isATM 
+        ? 'background:rgba(255,230,0,0.08); border-left:2px solid var(--gold); border-right:2px solid var(--gold); color:var(--gold); font-weight:800; font-size:13px; text-align:center; padding:10px;'
+        : 'background:rgba(255,255,255,0.01); border-right:1px solid rgba(255,255,255,0.06); color:#fff; font-weight:600; text-align:center; padding:10px;';
+        
+      const strikeKey = r.strike.toString().replace('.', '_');
+      
+      const ceLtp = r.ce_ltp > 0 ? r.ce_ltp.toFixed(2) : '—';
+      const ceLtpStyle = r.ce_ltp > 0 ? 'color:var(--green); font-family:\'JetBrains Mono\',monospace; font-weight:700;' : 'color:var(--muted);';
+      
+      const peLtp = r.pe_ltp > 0 ? r.pe_ltp.toFixed(2) : '—';
+      const peLtpStyle = r.pe_ltp > 0 ? 'color:var(--green); font-family:\'JetBrains Mono\',monospace; font-weight:700;' : 'color:var(--muted);';
+      
+      const ceBtn = r.ce_ltp > 0 
+        ? `<button onclick="placeManualOrder(${r.strike}, 'CE')" style="background:rgba(0, 255, 136, 0.1); border:1px solid rgba(0, 255, 136, 0.35); border-radius:6px; padding:6px 12px; color:#00ff88; font-weight:800; font-size:11px; cursor:pointer; width:100%; transition:all 0.2s;" onmouseover="this.style.background='rgba(0,255,136,0.2)'; this.style.boxShadow='0 0 10px rgba(0,255,136,0.3)';" onmouseout="this.style.background='rgba(0, 255, 136, 0.1)'; this.style.boxShadow='none';">BUY CE</button>`
+        : `<button disabled style="opacity:0.3; background:transparent; border:1px solid var(--border); border-radius:6px; padding:6px 12px; color:var(--muted); font-size:11px; width:100%; cursor:not-allowed;">BUY CE</button>`;
+        
+      const peBtn = r.pe_ltp > 0 
+        ? `<button onclick="placeManualOrder(${r.strike}, 'PE')" style="background:rgba(255, 0, 127, 0.1); border:1px solid rgba(255, 0, 127, 0.35); border-radius:6px; padding:6px 12px; color:#ff007f; font-weight:800; font-size:11px; cursor:pointer; width:100%; transition:all 0.2s;" onmouseover="this.style.background='rgba(255,0,127,0.2)'; this.style.boxShadow='0 0 10px rgba(255,0,127,0.3)';" onmouseout="this.style.background='rgba(255, 0, 127, 0.1)'; this.style.boxShadow='none';">BUY PE</button>`
+        : `<button disabled style="opacity:0.3; background:transparent; border:1px solid var(--border); border-radius:6px; padding:6px 12px; color:var(--muted); font-size:11px; width:100%; cursor:not-allowed;">BUY PE</button>`;
+
+      const ceSlVal = r.ce_ltp > 0 ? r.ce_sl.toFixed(2) : '';
+      const ceTpVal = r.ce_ltp > 0 ? r.ce_tp.toFixed(2) : '';
+      const peSlVal = r.pe_ltp > 0 ? r.pe_sl.toFixed(2) : '';
+      const peTpVal = r.pe_ltp > 0 ? r.pe_tp.toFixed(2) : '';
+      
+      const ceInputs = r.ce_ltp > 0
+        ? `<td style="padding:8px 6px;"><input type="number" step="0.05" id="ce_sl_${strikeKey}" value="${ceSlVal}" oninput="this.setAttribute('data-custom', 'true')" style="width:75px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:4px; padding:5px; color:#fff; font-family:'JetBrains Mono',monospace; font-size:11.5px; outline:none; text-align:center;"></td>
+           <td style="padding:8px 6px;"><input type="number" step="0.05" id="ce_tp_${strikeKey}" value="${ceTpVal}" oninput="this.setAttribute('data-custom', 'true')" style="width:75px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:4px; padding:5px; color:#fff; font-family:'JetBrains Mono',monospace; font-size:11.5px; outline:none; text-align:center;"></td>`
+        : `<td style="padding:8px 6px; text-align:center; color:var(--muted);">—</td><td style="padding:8px 6px; text-align:center; color:var(--muted);">—</td>`;
+        
+      const peInputs = r.pe_ltp > 0
+        ? `<td style="padding:8px 6px;"><input type="number" step="0.05" id="pe_sl_${strikeKey}" value="${peSlVal}" oninput="this.setAttribute('data-custom', 'true')" style="width:75px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:4px; padding:5px; color:#fff; font-family:'JetBrains Mono',monospace; font-size:11.5px; outline:none; text-align:center;"></td>
+           <td style="padding:8px 6px;"><input type="number" step="0.05" id="pe_tp_${strikeKey}" value="${peTpVal}" oninput="this.setAttribute('data-custom', 'true')" style="width:75px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:4px; padding:5px; color:#fff; font-family:'JetBrains Mono',monospace; font-size:11.5px; outline:none; text-align:center;"></td>`
+        : `<td style="padding:8px 6px; text-align:center; color:var(--muted);">—</td><td style="padding:8px 6px; text-align:center; color:var(--muted);">—</td>`;
+        
+      tr.innerHTML = `
+        <td id="ce_ltp_cell_${strikeKey}" style="padding:8px 14px; ${ceLtpStyle}">${ceLtp}</td>
+        ${ceInputs}
+        <td style="padding:8px; border-right:1px solid rgba(255,255,255,0.06); text-align:center;">${ceBtn}</td>
+        
+        <td style="${strikeStyle}">${r.strike}</td>
+        
+        <td id="pe_ltp_cell_${strikeKey}" style="padding:8px 14px; ${peLtpStyle}">${peLtp}</td>
+        ${peInputs}
+        <td style="padding:8px; text-align:center;">${peBtn}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  } else {
+    records.forEach(r => {
+      const strikeKey = r.strike.toString().replace('.', '_');
+      
+      const ceLtpEl = document.getElementById(`ce_ltp_cell_${strikeKey}`);
+      if (ceLtpEl) {
+        ceLtpEl.textContent = r.ce_ltp > 0 ? r.ce_ltp.toFixed(2) : '—';
+        ceLtpEl.style.color = r.ce_ltp > 0 ? 'var(--green)' : 'var(--muted)';
+      }
+      
+      const ceSlEl = document.getElementById(`ce_sl_${strikeKey}`);
+      if (ceSlEl && ceSlEl !== document.activeElement && ceSlEl.getAttribute('data-custom') !== 'true') {
+        ceSlEl.value = r.ce_ltp > 0 ? r.ce_sl.toFixed(2) : '';
+      }
+      
+      const ceTpEl = document.getElementById(`ce_tp_${strikeKey}`);
+      if (ceTpEl && ceTpEl !== document.activeElement && ceTpEl.getAttribute('data-custom') !== 'true') {
+        ceTpEl.value = r.ce_ltp > 0 ? r.ce_tp.toFixed(2) : '';
+      }
+      
+      const peLtpEl = document.getElementById(`pe_ltp_cell_${strikeKey}`);
+      if (peLtpEl) {
+        peLtpEl.textContent = r.pe_ltp > 0 ? r.pe_ltp.toFixed(2) : '—';
+        peLtpEl.style.color = r.pe_ltp > 0 ? 'var(--green)' : 'var(--muted)';
+      }
+      
+      const peSlEl = document.getElementById(`pe_sl_${strikeKey}`);
+      if (peSlEl && peSlEl !== document.activeElement && peSlEl.getAttribute('data-custom') !== 'true') {
+        peSlEl.value = r.pe_ltp > 0 ? r.pe_sl.toFixed(2) : '';
+      }
+      
+      const peTpEl = document.getElementById(`pe_tp_${strikeKey}`);
+      if (peTpEl && peTpEl !== document.activeElement && peTpEl.getAttribute('data-custom') !== 'true') {
+        peTpEl.value = r.pe_ltp > 0 ? r.pe_tp.toFixed(2) : '';
+      }
+    });
+  }
+}
+
+function recalculateSLTP() {
+  // LOT multiplier changes the trade quantity, not premium SL/TP percentages
+}
+
+async function placeManualOrder(strike, opt) {
+  const index = document.getElementById('mtIndexSelect').value;
+  const lotsInput = document.getElementById('mtLotsInput');
+  const errorEl = document.getElementById('mtModalError');
+  
+  errorEl.textContent = '';
+  
+  const lots = parseInt(lotsInput.value);
+  if (isNaN(lots) || lots <= 0) {
+    errorEl.textContent = '❌ Please specify a positive number of lots.';
+    return;
+  }
+  
+  const rec = currentChainData.records.find(r => r.strike === strike);
+  if (!rec) {
+    errorEl.textContent = '❌ Strike data not found in cache. Please refresh.';
+    return;
+  }
+  
+  const entry = opt === 'CE' ? rec.ce_ltp : rec.pe_ltp;
+  if (entry <= 0) {
+    errorEl.textContent = `❌ Cannot trade ${opt} option with 0 LTP.`;
+    return;
+  }
+  
+  const idSuffix = strike.toString().replace('.', '_');
+  const slEl = document.getElementById(`${opt.toLowerCase()}_sl_${idSuffix}`);
+  const tpEl = document.getElementById(`${opt.toLowerCase()}_tp_${idSuffix}`);
+  
+  const sl = parseFloat(slEl.value);
+  const tp = parseFloat(tpEl.value);
+  
+  if (isNaN(sl) || sl < 0) {
+    errorEl.textContent = '❌ Invalid Stop Loss value.';
+    return;
+  }
+  if (isNaN(tp) || tp <= 0) {
+    errorEl.textContent = '❌ Invalid Target Profit value.';
+    return;
+  }
+  
+  errorEl.textContent = '⏳ Executing order...';
+  
+  try {
+    const r = await fetch('/api/manual_trade/place', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        index: index,
+        strike: strike,
+        opt: opt,
+        entry: entry,
+        sl: sl,
+        tp: tp,
+        lots: lots
+      })
+    }).then(res => res.json());
+    
+    if (r.status === 'success') {
+      errorEl.style.color = 'var(--green)';
+      errorEl.textContent = `🟢 Success: ${r.message}`;
+      setTimeout(() => {
+        errorEl.style.color = 'var(--red)';
+        closeManualTradeModal();
+        load();
+      }, 1200);
+    } else {
+      errorEl.textContent = '❌ ' + r.message;
+    }
+  } catch(e) {
+    errorEl.textContent = '❌ Connection error: ' + e.message;
+  }
+}
+
+function playThemeSound(theme) {
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    const ctx = new AudioContext();
+    
+    if (theme === 'light') {
+      const notes = [523.25, 659.25, 783.99, 1046.50];
+      const duration = 0.12;
+      notes.forEach((freq, index) => {
+        const osc = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, ctx.currentTime + index * 0.08);
+        gainNode.gain.setValueAtTime(0.15, ctx.currentTime + index * 0.08);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + index * 0.08 + duration);
+        osc.connect(gainNode);
+        gainNode.connect(ctx.destination);
+        osc.start(ctx.currentTime + index * 0.08);
+        osc.stop(ctx.currentTime + index * 0.08 + duration);
+      });
+    } else {
+      const notes = [196.00, 293.66, 392.00, 440.00];
+      const duration = 0.35;
+      notes.forEach((freq, index) => {
+        const osc = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, ctx.currentTime + index * 0.12);
+        osc.detune.setValueAtTime(10, ctx.currentTime);
+        gainNode.gain.setValueAtTime(0.18, ctx.currentTime + index * 0.12);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + index * 0.12 + duration);
+        osc.connect(gainNode);
+        gainNode.connect(ctx.destination);
+        osc.start(ctx.currentTime + index * 0.12);
+        osc.stop(ctx.currentTime + index * 0.12 + duration);
+      });
+    }
+  } catch (e) {
+    console.error("Audio synthesis failed:", e);
+  }
+}
+
+function updateChartColors() {
+  const isLight = document.documentElement.classList.contains('light');
+  const gridColor = isLight ? 'rgba(15, 23, 42, 0.06)' : 'rgba(255, 255, 255, 0.04)';
+  const tickColor = isLight ? '#64748b' : '#546e7a';
+  const tooltipBg = isLight ? 'rgba(255, 255, 255, 0.95)' : 'rgba(10, 13, 20, 0.95)';
+  const tooltipBorder = isLight ? 'rgba(15, 23, 42, 0.12)' : 'rgba(0, 230, 118, 0.4)';
+  const tooltipBodyColor = isLight ? '#0f172a' : '#e8eaf6';
+  
+  [eqC, ddC, wlC].forEach(c => {
+    if (!c) return;
+    if (c.options.scales) {
+      if (c.options.scales.y) {
+        if (c.options.scales.y.grid) {
+          if (typeof c.options.scales.y.grid.color !== 'function') {
+            c.options.scales.y.grid.color = gridColor;
+          }
+        }
+        if (c.options.scales.y.ticks) {
+          c.options.scales.y.ticks.color = tickColor;
+        }
+      }
+      if (c.options.scales.x) {
+        if (c.options.scales.x.grid) {
+          c.options.scales.x.grid.color = gridColor;
+        }
+        if (c.options.scales.x.ticks) {
+          c.options.scales.x.ticks.color = tickColor;
+        }
+      }
+    }
+    if (c.options.plugins && c.options.plugins.tooltip) {
+      c.options.plugins.tooltip.backgroundColor = tooltipBg;
+      c.options.plugins.tooltip.borderColor = tooltipBorder;
+      c.options.plugins.tooltip.bodyColor = tooltipBodyColor;
+    }
+    c.update();
+  });
+}
+
+function toggleTheme() {
+  const isLight = document.documentElement.classList.toggle('light');
+  const theme = isLight ? 'light' : 'dark';
+  localStorage.setItem('theme', theme);
+  const themeBtn = document.getElementById('themeToggleBtn');
+  if (themeBtn) {
+    themeBtn.querySelector('.theme-icon').textContent = isLight ? '☀️' : '🌙';
+  }
+  playThemeSound(theme);
+  updateChartColors();
+}
+
 checkAuthStatus();
 </script>
 
@@ -5948,6 +6975,72 @@ checkAuthStatus();
   </div>
 </div>
 
+<!-- Modal for Manual Trade -->
+<div id="manualTradeModal" style="display:none; position:fixed; z-index:200; left:0; top:0; width:100%; height:100%; overflow:auto; background-color:rgba(0,0,0,0.85); backdrop-filter:blur(8px); align-items:center; justify-content:center;">
+  <div class="card" style="width:950px; max-width:95%; max-height:90vh; overflow-y:auto; background:rgba(9, 13, 26, 0.98); border:1px solid rgba(124, 77, 255, 0.4); box-shadow:0 0 40px rgba(124, 77, 255, 0.3); border-radius:20px; padding:28px; position:relative; display:flex; flex-direction:column; gap:20px;">
+    
+    <span onclick="closeManualTradeModal()" style="position:absolute; right:22px; top:18px; font-size:24px; font-weight:700; color:var(--muted); cursor:pointer; transition:color 0.2s;" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='var(--muted)'">&times;</span>
+    <div class="idx-title" style="color:#7c4dff; font-size:18px; font-weight:800; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:12px; text-transform:uppercase; letter-spacing:1.5px; display:flex; align-items:center; gap:8px;">
+      <span>⚡ Manual Trade Placement</span>
+    </div>
+    
+    <div style="display:flex; flex-wrap:wrap; gap:20px; align-items:flex-end;">
+      <div style="display:flex; flex-direction:column; gap:6px; min-width:180px;">
+        <label style="font-size:10.5px; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:var(--muted);">Select Index</label>
+        <select id="mtIndexSelect" onchange="loadManualTradeChain(true)" style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:10px 14px; color:#fff; font-family:'Inter',sans-serif; font-size:13px; font-weight:600; outline:none; cursor:pointer; transition:border-color 0.2s;" onfocus="this.style.borderColor='rgba(124,77,255,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.08)'">
+        </select>
+      </div>
+      
+      <div style="display:flex; flex-direction:column; gap:6px; min-width:100px;">
+        <label style="font-size:10.5px; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:var(--muted);">Lots Multiplier</label>
+        <input type="number" id="mtLotsInput" value="1" min="1" onchange="recalculateSLTP()" style="width:100%; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:10px; color:#fff; font-family:'JetBrains Mono',monospace; font-size:13px; font-weight:600; outline:none; transition:border-color 0.2s;" onfocus="this.style.borderColor='rgba(124,77,255,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.08)'">
+      </div>
+      
+      <div style="flex:1; display:flex; justify-content:flex-end; gap:20px; font-size:13px;">
+        <div style="text-align:right;">
+          <span style="color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; display:block; margin-bottom:4px;">Index Spot</span>
+          <span id="mtSpotPrice" style="color:#00f0ff; font-family:'JetBrains Mono',monospace; font-size:16px; font-weight:800;">—</span>
+        </div>
+        <div style="text-align:right;">
+          <span style="color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; display:block; margin-bottom:4px;">Expiry Date</span>
+          <span id="mtExpiryDate" style="color:#ffe600; font-family:'JetBrains Mono',monospace; font-size:14px; font-weight:700;">—</span>
+        </div>
+      </div>
+    </div>
+    
+    <div style="overflow-x:auto; border:1px solid rgba(255,255,255,0.06); border-radius:12px; background:rgba(2,3,6,0.5);">
+      <table style="width:100%; border-collapse:collapse; text-align:left; font-size:12px;">
+        <thead>
+          <tr style="background:rgba(255,255,255,0.02); border-bottom:1px solid rgba(255,255,255,0.06); text-transform:uppercase; font-size:10px; font-weight:800; letter-spacing:1px; color:var(--muted);">
+            <th colspan="4" style="text-align:center; padding:12px; border-right:1px solid rgba(255,255,255,0.06); color:#00ff88; background:rgba(0,255,136,0.01);">CALL OPTIONS (CE)</th>
+            <th style="text-align:center; padding:12px; border-right:1px solid rgba(255,255,255,0.06); width:120px;">STRIKE</th>
+            <th colspan="4" style="text-align:center; padding:12px; color:#ff007f; background:rgba(255,0,127,0.01);">PUT OPTIONS (PE)</th>
+          </tr>
+          <tr style="border-bottom:1px solid rgba(255,255,255,0.06); font-size:10.5px; color:#a3a3c2;">
+            <th style="padding:10px 14px;">LTP (Rs.)</th>
+            <th style="padding:10px;">AUTO SL (Rs.)</th>
+            <th style="padding:10px;">AUTO TP (Rs.)</th>
+            <th style="padding:10px; border-right:1px solid rgba(255,255,255,0.06); text-align:center; width:90px;">Action</th>
+            <th style="padding:10px; text-align:center; font-weight:700; border-right:1px solid rgba(255,255,255,0.06); background:rgba(255,255,255,0.01);">Price</th>
+            <th style="padding:10px 14px;">LTP (Rs.)</th>
+            <th style="padding:10px;">AUTO SL (Rs.)</th>
+            <th style="padding:10px;">AUTO TP (Rs.)</th>
+            <th style="padding:10px; text-align:center; width:90px;">Action</th>
+          </tr>
+        </thead>
+        <tbody id="mtOptionChainBody">
+        </tbody>
+      </table>
+    </div>
+    
+    <div id="mtModalError" style="color:var(--red); font-size:12px; font-weight:600; min-height:16px;"></div>
+    
+    <div style="display:flex; justify-content:flex-end; gap:12px;">
+      <button onclick="closeManualTradeModal()" style="background:transparent; border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:11px 22px; color:var(--muted); font-size:13px; font-weight:700; cursor:pointer; transition:all 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.03)'; this.style.color='#fff';" onmouseout="this.style.background='transparent'; this.style.color='var(--muted)';">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- Modal for Charges Breakdown -->
 <div id="chargesModal" style="display:none; position:fixed; z-index:200; left:0; top:0; width:100%; height:100%; overflow:auto; background-color:rgba(0,0,0,0.75); backdrop-filter:blur(5px); align-items:center; justify-content:center;">
   <div class="card" style="width:450px; background:rgba(9, 13, 26, 0.95); border:1px solid rgba(255, 140, 0, 0.4); box-shadow:0 0 30px rgba(255, 140, 0, 0.25); border-radius:16px; padding:24px; position:relative;">
@@ -5959,41 +7052,7 @@ checkAuthStatus();
   </div>
 </div>
 
-<!-- Modal for Live Broker Selection (Groww Only) -->
-<div id="liveBrokerSelectModal" style="display:none; position:fixed; z-index:200; left:0; top:0; width:100%; height:100%; overflow:auto; background-color:rgba(0,0,0,0.8); backdrop-filter:blur(8px); align-items:center; justify-content:center;">
-  <div class="card" style="width:440px; background:rgba(13, 17, 28, 0.98); border:1px solid rgba(124, 77, 255, 0.4); box-shadow:0 25px 60px rgba(0,0,0,0.8), 0 0 30px rgba(124,77,255,0.2); border-radius:20px; padding:32px; position:relative;">
-    <span onclick="closeLiveBrokerSelection()" style="position:absolute; right:20px; top:15px; font-size:24px; font-weight:700; color:var(--muted); cursor:pointer; transition:color 0.2s;" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='var(--muted)'">&times;</span>
-    <div class="idx-title" style="color:#7c4dff; font-size:16px; font-weight:800; border-bottom:1px solid rgba(255,255,255,0.06); padding-bottom:12px; margin-bottom:24px; text-transform:uppercase; letter-spacing:1.5px; display:flex; align-items:center; gap:8px;">
-      <span>⚡ Activate Live Trading — Groww</span>
-    </div>
-    <p style="font-size:13px; color:var(--muted); line-height:1.6; margin-bottom:28px;">
-      You are about to activate <strong style="color:#d68aff">LIVE GROWW TRADING</strong>. Real money orders will be placed via your Groww account. Please ensure your API credentials are ready.
-    </p>
-    
-    <div style="display:flex; justify-content:center; margin-bottom:12px;">
-      <!-- Groww Choice Card -->
-      <div onclick="selectLiveBroker('GROWW')" style="background:rgba(124, 77, 255, 0.05); border:1.5px solid rgba(124, 77, 255, 0.4); border-radius:16px; padding:28px 40px; text-align:center; cursor:pointer; transition:all 0.3s cubic-bezier(0.4, 0, 0.2, 1); display:flex; flex-direction:column; align-items:center; gap:16px; box-shadow:0 4px 20px rgba(0,0,0,0.3);" onmouseover="this.style.borderColor='rgba(124, 77, 255, 0.9)'; this.style.background='rgba(124, 77, 255, 0.1)'; this.style.boxShadow='0 0 30px rgba(124, 77, 255, 0.35)'; this.style.transform='translateY(-4px)';" onmouseout="this.style.borderColor='rgba(124, 77, 255, 0.4)'; this.style.background='rgba(124, 77, 255, 0.05)'; this.style.boxShadow='0 4px 20px rgba(0,0,0,0.3)'; this.style.transform='none';">
-        <svg style="width:56px; height:56px;" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <g clip-path="url(#growwModalClip2)">
-            <rect x="0" y="0" width="24" height="24" fill="#5367F5"/>
-            <path d="M 0 14.5 L 9 10.5 L 14.5 13 L 24 7.5 L 24 24 L 0 24 Z" fill="#00D09C"/>
-          </g>
-          <defs>
-            <clipPath id="growwModalClip2">
-              <circle cx="12" cy="12" r="11"/>
-            </clipPath>
-          </defs>
-        </svg>
-        <div>
-          <div style="font-size:20px; font-weight:900; color:#fff; margin-bottom:6px; text-shadow:0 0 15px rgba(124,77,255,0.5);">GROWW</div>
-          <div style="font-size:11px; color:#d68aff; font-weight:700; text-transform:uppercase; letter-spacing:1px;">Official Trade API</div>
-          <div style="font-size:10px; color:var(--green); font-weight:600; margin-top:4px;">&#x2713; F&amp;O Options Trading</div>
-        </div>
-      </div>
-    </div>
-    
-  </div>
-</div>
+<!-- Modal for Live Broker Selection (Groww Only) removed -->
 
 <!-- Modal for Capital Update -->
 <div id="capitalModal" style="display:none; position:fixed; z-index:200; left:0; top:0; width:100%; height:100%; overflow:auto; background-color:rgba(0,0,0,0.75); backdrop-filter:blur(5px); align-items:center; justify-content:center;">
@@ -6035,6 +7094,37 @@ checkAuthStatus();
       <div style="display:flex; justify-content:flex-end; gap:14px; margin-top:10px;">
         <button onclick="closeResetConfirmModal()" style="background:transparent; border:1.5px solid rgba(0, 240, 255, 0.3); border-radius:8px; padding:11px 20px; color:#00f0ff; font-size:12.5px; font-weight:700; cursor:pointer; transition:all 0.3s; text-shadow:0 0 6px rgba(0,240,255,0.3);" onmouseover="this.style.background='rgba(0, 240, 255, 0.1)'; this.style.borderColor='#00f0ff'; this.style.boxShadow='0 0 15px rgba(0, 240, 255, 0.45)';" onmouseout="this.style.background='transparent'; this.style.borderColor='rgba(0, 240, 255, 0.3)'; this.style.boxShadow='none';">Cancel Session</button>
         <button id="modalResetConfirmBtn" onclick="confirmResetTradingLog()" style="background:linear-gradient(135deg, #ff007f, #ff00e4); border:none; border-radius:8px; padding:11px 24px; color:#ffffff; font-size:12.5px; font-weight:800; cursor:pointer; transition:all 0.3s; box-shadow:0 0 20px rgba(255, 0, 127, 0.6); text-shadow:0 0 8px rgba(255,255,255,0.55);" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 0 32px rgba(255, 0, 228, 0.95)'; this.style.filter='brightness(1.1)';" onmouseout="this.style.transform='none'; this.style.boxShadow='0 0 20px rgba(255, 0, 127, 0.6)'; this.style.filter='none';">Execute Reset</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal for Modifying User Account -->
+<div id="modifyUserModal" style="display:none; position:fixed; z-index:200; left:0; top:0; width:100%; height:100%; overflow:auto; background-color:rgba(0,0,0,0.75); backdrop-filter:blur(5px); align-items:center; justify-content:center;">
+  <div class="card" style="width:400px; background:rgba(9, 13, 26, 0.95); border:1px solid rgba(0, 240, 255, 0.4); box-shadow:0 0 30px rgba(0, 240, 255, 0.25); border-radius:16px; padding:24px; position:relative;">
+    <span onclick="closeModifyUserModal()" style="position:absolute; right:18px; top:12px; font-size:20px; font-weight:700; color:var(--muted); cursor:pointer; transition:color 0.2s;" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='var(--muted)'">&times;</span>
+    <div class="idx-title" style="color:#00f0ff; font-size:15px; font-weight:800; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:10px; margin-bottom:16px; text-transform:uppercase; letter-spacing:1px;">✏️ Modify User Account</div>
+    <input type="hidden" id="modifyUserId">
+    <div style="display:flex; flex-direction:column; gap:16px;">
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <label for="modifyUsername" style="font-size:10.5px; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:var(--muted);">Username</label>
+        <input type="text" id="modifyUsername" style="width:100%; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:12px; color:#fff; font-family:'JetBrains Mono',monospace; font-size:14px; outline:none; transition:border-color 0.2s;" onfocus="this.style.borderColor='rgba(0,240,255,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.08)'">
+      </div>
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <label for="modifyPassword" style="font-size:10.5px; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:var(--muted);">Password</label>
+        <input type="text" id="modifyPassword" placeholder="Enter new password (optional)" style="width:100%; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:12px; color:#fff; font-family:'JetBrains Mono',monospace; font-size:14px; outline:none; transition:border-color 0.2s;" onfocus="this.style.borderColor='rgba(0,240,255,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.08)'">
+      </div>
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <label for="modifyRole" style="font-size:10.5px; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:var(--muted);">Role</label>
+        <select id="modifyRole" style="width:100%; background:rgba(9, 13, 26, 0.95); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:12px; color:#fff; font-family:'Inter',sans-serif; font-size:14px; outline:none; transition:border-color 0.2s;" onfocus="this.style.borderColor='rgba(0,240,255,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.08)'">
+          <option value="user">USER</option>
+          <option value="admin">ADMIN</option>
+        </select>
+      </div>
+      <div id="modifyUserModalError" style="color:var(--red); font-size:11.5px; font-weight:600; min-height:15px;"></div>
+      <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:4px;">
+        <button onclick="closeModifyUserModal()" style="background:transparent; border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:10px 18px; color:var(--muted); font-size:12.5px; font-weight:700; cursor:pointer; transition:all 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.03)'; this.style.color='#fff';" onmouseout="this.style.background='transparent'; this.style.color='var(--muted)';">Cancel</button>
+        <button onclick="submitModifyUser()" style="background:linear-gradient(135deg, #00b0ff, #00e5ff); border:none; border-radius:8px; padding:10px 22px; color:#060b18; font-size:12.5px; font-weight:800; cursor:pointer; transition:transform 0.2s, brightness 0.2s; box-shadow:0 0 15px rgba(0, 240, 255, 0.35);" onmouseover="this.style.transform='translateY(-1px)'; this.style.filter='brightness(1.1)';" onmouseout="this.style.transform='none'; this.style.filter='none';">Save Changes</button>
       </div>
     </div>
   </div>

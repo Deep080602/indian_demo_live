@@ -46,21 +46,38 @@ import android.content.Context
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import android.media.ToneGenerator
+import android.media.AudioManager
 
 // =============================================================================
-// COLOR PALETTE (EXACT WEBSITE MATCH)
+// COLOR PALETTE (EXACT WEBSITE MATCH) - DYNAMIC GETTERS
 // =============================================================================
 
-val ColorBG = Color(0xFF0A0E27)
-val ColorCardBG = Color(0xCC1E283C)      // rgba(30, 40, 60, 0.8)
-val ColorBorder = Color(0x336496FF)      // rgba(100, 150, 255, 0.2)
-val ColorGreen = Color(0xFF00FF88)       // Neon Green
-val ColorRed = Color(0xFFFF4466)         // Cyberpunk Red/Pink (#ff4466)
-val ColorBlue = Color(0xFF00CCFF)        // Tech Cyan (#00ccff)
-val ColorGold = Color(0xFFFFD700)        // Gold (#ffd700)
-val ColorMuted = Color(0xFFA0AEC0)       // Muted Text (#a0aec0)
-val ColorText = Color(0xFFE8EAF6)        // Light text (#e8eaf6)
-val ColorAccent = Color(0xFFBB66FF)      // Purple (#bb66ff)
+var isLightTheme by mutableStateOf(false)
+
+val ColorBG: Color get() = if (isLightTheme) Color(0xFFF8FAFC) else Color(0xFF0A0E27)
+val ColorCardBG: Color get() = if (isLightTheme) Color(0xFFFFFFFF) else Color(0xCC1E283C)
+val ColorBorder: Color get() = if (isLightTheme) Color(0x1A0F172A) else Color(0x336496FF)
+val ColorGreen: Color get() = if (isLightTheme) Color(0xFF0F766E) else Color(0xFF00FF88)
+val ColorRed: Color get() = if (isLightTheme) Color(0xFFBE123C) else Color(0xFFFF4466)
+val ColorBlue: Color get() = if (isLightTheme) Color(0xFF0284C7) else Color(0xFF00CCFF)
+val ColorGold: Color get() = if (isLightTheme) Color(0xFFB45309) else Color(0xFFFFD700)
+val ColorMuted: Color get() = if (isLightTheme) Color(0xFF64748B) else Color(0xFFA0AEC0)
+val ColorText: Color get() = if (isLightTheme) Color(0xFF0F172A) else Color(0xFFE8EAF6)
+val ColorAccent: Color get() = if (isLightTheme) Color(0xFF7C3AED) else Color(0xFFBB66FF)
+
+fun playThemeSoundAndroid(isLight: Boolean) {
+    try {
+        val toneGen = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
+        if (isLight) {
+            toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
+        } else {
+            toneGen.startTone(ToneGenerator.TONE_PROP_ACK, 250)
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+}
 
 
 // =============================================================================
@@ -127,6 +144,21 @@ data class SmartStatus(
     val threshold: String = "50%"
 )
 
+data class UserCredentials(
+    val id: Int = 0,
+    val username: String = "",
+    val passwordPlain: String = "",
+    val isAdmin: Boolean = false,
+    val tradingActive: Boolean = true,
+    val createdAt: String = ""
+)
+
+data class AiBrainStatus(
+    val trained: Boolean = false,
+    val accuracy: Double = 0.0,
+    val samples: Int = 0
+)
+
 data class TradingData(
     val niftySpot: Double = 0.0,
     val sensexSpot: Double = 0.0,
@@ -146,7 +178,11 @@ data class TradingData(
     val equity: List<Double> = emptyList(),
     val tradingIndices: List<String> = emptyList(),
     val smartStatus: SmartStatus = SmartStatus(),
-    val log: List<String> = emptyList()
+    val aiBrainEnabled: Boolean = false,
+    val aiBrainStatus: AiBrainStatus = AiBrainStatus(),
+    val log: List<String> = emptyList(),
+    val isAdmin: Boolean = false,
+    val userList: List<UserCredentials> = emptyList()
 )
 
 // =============================================================================
@@ -172,6 +208,10 @@ class MainActivity : ComponentActivity() {
 fun NiftyTraderApp() {
     val context = LocalContext.current
     val sharedPrefs = remember { context.getSharedPreferences("nifty_trader_prefs", android.content.Context.MODE_PRIVATE) }
+
+    LaunchedEffect(Unit) {
+        isLightTheme = sharedPrefs.getBoolean("is_light_theme", false)
+    }
 
     var rawBaseUrl by remember {
         mutableStateOf(sharedPrefs.getString("raw_base_url", "https://overexert-purposely-illusion.ngrok-free.dev") ?: "https://overexert-purposely-illusion.ngrok-free.dev")
@@ -215,6 +255,19 @@ fun NiftyTraderApp() {
     var editTp by remember { mutableStateOf("") }
     var editTsl by remember { mutableStateOf(false) }
     var isUpdatingPosition by remember { mutableStateOf(false) }
+
+    // Admin User Credentials management state
+    var editingUser by remember { mutableStateOf<UserCredentials?>(null) }
+    var showEditDialog by remember { mutableStateOf(false) }
+    var editUsername by remember { mutableStateOf("") }
+    var editPassword by remember { mutableStateOf("") }
+    var editIsAdmin by remember { mutableStateOf(false) }
+    var isSubmittingEdit by remember { mutableStateOf(false) }
+    var editUserError by remember { mutableStateOf<String?>(null) }
+
+    var userToDelete by remember { mutableStateOf<UserCredentials?>(null) }
+    var showDeleteConfirmDialog by remember { mutableStateOf(false) }
+    var isSubmittingDelete by remember { mutableStateOf(false) }
 
     var showFullHistory by remember { mutableStateOf(false) }
     var isRefreshing by remember { mutableStateOf(false) }
@@ -313,6 +366,19 @@ fun NiftyTraderApp() {
                             modifier = Modifier.graphicsLayer(rotationZ = if (isRefreshing) spinAngle else 0f)
                         )
                     }
+                    // Theme Toggle button
+                    IconButton(
+                        onClick = {
+                            isLightTheme = !isLightTheme
+                            sharedPrefs.edit().putBoolean("is_light_theme", isLightTheme).apply()
+                            playThemeSoundAndroid(isLightTheme)
+                        }
+                    ) {
+                        Text(
+                            text = if (isLightTheme) "☀️" else "🌙",
+                            fontSize = 20.sp
+                        )
+                    }
                     // Settings button
                     IconButton(onClick = { showUrlConfig = !showUrlConfig }) {
                         Text(
@@ -324,8 +390,8 @@ fun NiftyTraderApp() {
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF090D1A),
-                    titleContentColor = Color.White
+                    containerColor = ColorCardBG,
+                    titleContentColor = ColorText
                 )
             )
         },
@@ -693,36 +759,70 @@ fun NiftyTraderApp() {
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 var isSubmittingFilter by remember { mutableStateOf(false) }
-                                // Smart Guard Toggle Button
-                                Button(
-                                    onClick = {
-                                        if (!isSubmittingFilter) {
-                                            isSubmittingFilter = true
-                                            coroutineScope.launch {
-                                                toggleSmartFilter(baseUrl, !tradingData.smartFilterEnabled)
-                                                delay(500)
-                                                try {
-                                                    tradingData = fetchDashboardData(baseUrl)
-                                                } catch (e: Exception) {}
-                                                isSubmittingFilter = false
+                                if (tradingData.isAdmin) {
+                                    // Smart Guard Toggle Button
+                                    Button(
+                                        onClick = {
+                                            if (!isSubmittingFilter) {
+                                                isSubmittingFilter = true
+                                                coroutineScope.launch {
+                                                    toggleSmartFilter(baseUrl, !tradingData.smartFilterEnabled)
+                                                    delay(500)
+                                                    try {
+                                                        tradingData = fetchDashboardData(baseUrl)
+                                                    } catch (e: Exception) {}
+                                                    isSubmittingFilter = false
+                                                }
                                             }
-                                        }
-                                    },
-                                    modifier = Modifier.weight(1f).height(32.dp),
-                                    contentPadding = PaddingValues(0.dp),
-                                    shape = RoundedCornerShape(6.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = if (tradingData.smartFilterEnabled) ColorGreen.copy(alpha = 0.15f) else Color.Transparent
-                                    ),
-                                    border = BorderStroke(1.dp, if (tradingData.smartFilterEnabled) ColorGreen else ColorBorder)
-                                ) {
-                                    Text(
-                                        text = if (tradingData.smartFilterEnabled) "🛡️ GUARD: ON" else "🛡️ GUARD: OFF",
-                                        color = if (tradingData.smartFilterEnabled) ColorGreen else ColorMuted,
-                                        fontSize = 9.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        fontFamily = FontFamily.Monospace
-                                    )
+                                        },
+                                        modifier = Modifier.weight(1f).height(32.dp),
+                                        contentPadding = PaddingValues(0.dp),
+                                        shape = RoundedCornerShape(6.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = if (tradingData.smartFilterEnabled) ColorGreen.copy(alpha = 0.15f) else Color.Transparent
+                                        ),
+                                        border = BorderStroke(1.dp, if (tradingData.smartFilterEnabled) ColorGreen else ColorBorder)
+                                    ) {
+                                        Text(
+                                            text = if (tradingData.smartFilterEnabled) "🛡️ GUARD: ON" else "🛡️ GUARD: OFF",
+                                            color = if (tradingData.smartFilterEnabled) ColorGreen else ColorMuted,
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                    }
+
+                                    // AI Brain Toggle Button
+                                    Button(
+                                        onClick = {
+                                            if (!isSubmittingFilter) {
+                                                isSubmittingFilter = true
+                                                coroutineScope.launch {
+                                                    toggleAiBrain(baseUrl, !tradingData.aiBrainEnabled)
+                                                    delay(500)
+                                                    try {
+                                                        tradingData = fetchDashboardData(baseUrl)
+                                                    } catch (e: Exception) {}
+                                                    isSubmittingFilter = false
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1f).height(32.dp),
+                                        contentPadding = PaddingValues(0.dp),
+                                        shape = RoundedCornerShape(6.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = if (tradingData.aiBrainEnabled) Color(0xFF9C27B0).copy(alpha = 0.15f) else Color.Transparent
+                                        ),
+                                        border = BorderStroke(1.dp, if (tradingData.aiBrainEnabled) Color(0xFF9C27B0) else ColorBorder)
+                                    ) {
+                                        Text(
+                                            text = if (tradingData.aiBrainEnabled) "🧠 AI: ON" else "🧠 AI: OFF",
+                                            color = if (tradingData.aiBrainEnabled) Color(0xFF9C27B0) else ColorMuted,
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                    }
                                 }
 
                                 // Trailing SL Toggle Button
@@ -848,6 +948,177 @@ fun NiftyTraderApp() {
                                     }
                                 }
                             }
+
+                            if (tradingData.isAdmin && tradingData.userList.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(ColorBorder))
+                                Spacer(modifier = Modifier.height(16.dp))
+
+                                Text(
+                                    text = "👥 SYSTEM USER CREDENTIALS",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = ColorBlue,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                Column(
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    tradingData.userList.forEach { user ->
+                                        Card(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            shape = RoundedCornerShape(8.dp),
+                                            colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.02f)),
+                                            border = BorderStroke(1.dp, ColorBorder.copy(alpha = 0.5f))
+                                        ) {
+                                            Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.Top
+                                                ) {
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Text(
+                                                            text = user.username,
+                                                            color = ColorText,
+                                                            fontSize = 14.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            fontFamily = FontFamily.Monospace
+                                                        )
+                                                        Spacer(modifier = Modifier.height(2.dp))
+                                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                                            Text(
+                                                                text = "Role: " + if (user.isAdmin) "Admin" else "User",
+                                                                color = if (user.isAdmin) ColorGold else ColorMuted,
+                                                                fontSize = 9.sp,
+                                                                fontFamily = FontFamily.Monospace
+                                                            )
+                                                            Spacer(modifier = Modifier.width(10.dp))
+                                                            Box(
+                                                                modifier = Modifier
+                                                                    .size(6.dp)
+                                                                    .background(
+                                                                        if (user.tradingActive) ColorGreen else ColorMuted,
+                                                                        shape = RoundedCornerShape(50)
+                                                                    )
+                                                            )
+                                                            Spacer(modifier = Modifier.width(4.dp))
+                                                            Text(
+                                                                text = if (user.tradingActive) "RUNNING" else "PAUSED",
+                                                                color = if (user.tradingActive) ColorGreen else ColorMuted,
+                                                                fontSize = 9.sp,
+                                                                fontWeight = FontWeight.Bold,
+                                                                fontFamily = FontFamily.Monospace
+                                                            )
+                                                        }
+                                                        if (user.createdAt.isNotEmpty()) {
+                                                            Spacer(modifier = Modifier.height(2.dp))
+                                                            Text(
+                                                                text = "Registered: ${user.createdAt}",
+                                                                color = ColorMuted,
+                                                                fontSize = 9.sp,
+                                                                fontFamily = FontFamily.Monospace
+                                                            )
+                                                        }
+                                                    }
+                                                    Text(
+                                                        text = "🔑 " + user.passwordPlain,
+                                                        color = ColorGreen,
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontFamily = FontFamily.Monospace
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.height(12.dp))
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                ) {
+                                                    Button(
+                                                        onClick = {
+                                                            coroutineScope.launch {
+                                                                val success = adminToggleUserTrading(baseUrl, user.id, !user.tradingActive)
+                                                                if (success) {
+                                                                    try {
+                                                                        tradingData = fetchDashboardData(baseUrl)
+                                                                    } catch (e: Exception) {}
+                                                                }
+                                                            }
+                                                        },
+                                                        colors = ButtonDefaults.buttonColors(
+                                                            containerColor = if (user.tradingActive) ColorRed.copy(alpha = 0.1f) else ColorGreen.copy(alpha = 0.1f)
+                                                        ),
+                                                        border = BorderStroke(1.dp, if (user.tradingActive) ColorRed.copy(alpha = 0.4f) else ColorGreen.copy(alpha = 0.4f)),
+                                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                                        modifier = Modifier.height(28.dp),
+                                                        shape = RoundedCornerShape(6.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = if (user.tradingActive) "🛑 STOP ALGO" else "▶ START ALGO",
+                                                            color = if (user.tradingActive) ColorRed else ColorGreen,
+                                                            fontSize = 9.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            fontFamily = FontFamily.Monospace
+                                                        )
+                                                    }
+
+                                                    Button(
+                                                        onClick = {
+                                                            editingUser = user
+                                                            editUsername = user.username
+                                                            editPassword = user.passwordPlain
+                                                            editIsAdmin = user.isAdmin
+                                                            editUserError = null
+                                                            showEditDialog = true
+                                                        },
+                                                        colors = ButtonDefaults.buttonColors(
+                                                            containerColor = ColorBlue.copy(alpha = 0.1f)
+                                                        ),
+                                                        border = BorderStroke(1.dp, ColorBlue.copy(alpha = 0.4f)),
+                                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                                        modifier = Modifier.height(28.dp),
+                                                        shape = RoundedCornerShape(6.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = "✏️ EDIT",
+                                                            color = ColorBlue,
+                                                            fontSize = 9.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            fontFamily = FontFamily.Monospace
+                                                        )
+                                                    }
+
+                                                    if (user.username != username) {
+                                                        Button(
+                                                            onClick = {
+                                                                userToDelete = user
+                                                                showDeleteConfirmDialog = true
+                                                            },
+                                                            colors = ButtonDefaults.buttonColors(
+                                                                containerColor = ColorRed.copy(alpha = 0.1f)
+                                                            ),
+                                                            border = BorderStroke(1.dp, ColorRed.copy(alpha = 0.4f)),
+                                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                                            modifier = Modifier.height(28.dp),
+                                                            shape = RoundedCornerShape(6.dp)
+                                                        ) {
+                                                            Text(
+                                                                text = "❌ DELETE",
+                                                                color = ColorRed,
+                                                                fontSize = 9.sp,
+                                                                fontWeight = FontWeight.Bold,
+                                                                fontFamily = FontFamily.Monospace
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -928,26 +1199,50 @@ fun NiftyTraderApp() {
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // 3.2 SMART SIGNAL GUARD CARD
-                var isUpdatingFilterCard by remember { mutableStateOf(false) }
-                SmartSignalGuardCard(
-                    status = tradingData.smartStatus,
-                    onToggleChange = { enabled ->
-                        if (!isUpdatingFilterCard) {
-                            isUpdatingFilterCard = true
-                            coroutineScope.launch {
-                                toggleSmartFilter(baseUrl, enabled)
-                                delay(500)
-                                try {
-                                    tradingData = fetchDashboardData(baseUrl)
-                                } catch (e: Exception) {}
-                                isUpdatingFilterCard = false
+                if (tradingData.isAdmin) {
+                    // 3.2 SMART SIGNAL GUARD CARD
+                    var isUpdatingFilterCard by remember { mutableStateOf(false) }
+                    SmartSignalGuardCard(
+                        status = tradingData.smartStatus,
+                        onToggleChange = { enabled ->
+                            if (!isUpdatingFilterCard) {
+                                isUpdatingFilterCard = true
+                                coroutineScope.launch {
+                                    toggleSmartFilter(baseUrl, enabled)
+                                    delay(500)
+                                    try {
+                                        tradingData = fetchDashboardData(baseUrl)
+                                    } catch (e: Exception) {}
+                                    isUpdatingFilterCard = false
+                                }
                             }
                         }
-                    }
-                )
+                    )
 
-                Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // 3.3 AI BRAIN CARD
+                    var isUpdatingAiCard by remember { mutableStateOf(false) }
+                    AITradingBrainCard(
+                        status = tradingData.aiBrainStatus,
+                        enabled = tradingData.aiBrainEnabled,
+                        onToggleChange = { enabled ->
+                            if (!isUpdatingAiCard) {
+                                isUpdatingAiCard = true
+                                coroutineScope.launch {
+                                    toggleAiBrain(baseUrl, enabled)
+                                    delay(500)
+                                    try {
+                                        tradingData = fetchDashboardData(baseUrl)
+                                    } catch (e: Exception) {}
+                                    isUpdatingAiCard = false
+                                }
+                            }
+                        }
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
 
                 // 3.5 INTERACTIVE CHART VISUALIZATION (DROPDOWN-TOGGLED)
                 InteractiveChartCard(tradingData)
@@ -1350,6 +1645,230 @@ fun NiftyTraderApp() {
                         TextButton(
                             onClick = { showAuthDialog = false },
                             enabled = !authIsSubmitting
+                        ) {
+                            Text(
+                                text = "CANCEL", 
+                                color = ColorMuted, 
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                )
+            }
+
+            // Edit User Dialog Modal
+            if (showEditDialog && editingUser != null) {
+                AlertDialog(
+                    onDismissRequest = { 
+                        if (!isSubmittingEdit) showEditDialog = false 
+                    },
+                    containerColor = Color(0xFF090D1A),
+                    modifier = Modifier.border(1.5.dp, ColorBlue.copy(alpha = 0.5f), RoundedCornerShape(24.dp)),
+                    title = {
+                        Text(
+                            text = "✏️ MODIFY USER ACCOUNT",
+                            color = ColorBlue,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold
+                        )
+                    },
+                    text = {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                text = "Modifying account for User ID: ${editingUser?.id}",
+                                color = ColorMuted,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier.padding(bottom = 12.dp)
+                            )
+                            
+                            OutlinedTextField(
+                                value = editUsername,
+                                onValueChange = { editUsername = it },
+                                label = { Text("Username", color = ColorMuted, fontFamily = FontFamily.Monospace) },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                textStyle = LocalTextStyle.current.copy(color = ColorText, fontFamily = FontFamily.Monospace),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = ColorBlue,
+                                    unfocusedBorderColor = ColorBorder
+                                )
+                            )
+                            
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            OutlinedTextField(
+                                value = editPassword,
+                                onValueChange = { editPassword = it },
+                                label = { Text("Plaintext Password", color = ColorMuted, fontFamily = FontFamily.Monospace) },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                textStyle = LocalTextStyle.current.copy(color = ColorText, fontFamily = FontFamily.Monospace),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = ColorBlue,
+                                    unfocusedBorderColor = ColorBorder
+                                )
+                            )
+                            
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { editIsAdmin = !editIsAdmin }
+                                    .padding(vertical = 4.dp)
+                            ) {
+                                Checkbox(
+                                    checked = editIsAdmin,
+                                    onCheckedChange = { editIsAdmin = it },
+                                    colors = CheckboxDefaults.colors(checkedColor = ColorBlue)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Administrator Privilege",
+                                    color = ColorText,
+                                    fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+
+                            editUserError?.let { err ->
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    text = "❌ $err",
+                                    color = ColorRed,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                val user = editingUser ?: return@Button
+                                if (editUsername.trim().isEmpty()) {
+                                    editUserError = "Username cannot be empty."
+                                    return@Button
+                                }
+                                isSubmittingEdit = true
+                                editUserError = null
+                                coroutineScope.launch {
+                                    val success = modifyUserAccount(
+                                        baseUrl = baseUrl,
+                                        targetUserId = user.id,
+                                        newUsername = editUsername.trim(),
+                                        newPasswordPlain = editPassword.trim(),
+                                        newIsAdmin = editIsAdmin
+                                    )
+                                    isSubmittingEdit = false
+                                    if (success) {
+                                        showEditDialog = false
+                                        try {
+                                            tradingData = fetchDashboardData(baseUrl)
+                                        } catch (e: Exception) {}
+                                    } else {
+                                        editUserError = "Failed to modify user. Username might be taken."
+                                    }
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = ColorBlue.copy(alpha = 0.2f)),
+                            border = BorderStroke(1.dp, ColorBlue),
+                            modifier = Modifier.height(36.dp),
+                            shape = RoundedCornerShape(6.dp),
+                            enabled = !isSubmittingEdit
+                        ) {
+                            Text(
+                                text = if (isSubmittingEdit) "SAVING..." else "SAVE CHANGES", 
+                                color = ColorBlue, 
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Black
+                            )
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = { showEditDialog = false },
+                            enabled = !isSubmittingEdit
+                        ) {
+                            Text(
+                                text = "CANCEL", 
+                                color = ColorMuted, 
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                )
+            }
+
+            // Delete User Dialog Modal
+            if (showDeleteConfirmDialog && userToDelete != null) {
+                AlertDialog(
+                    onDismissRequest = { 
+                        if (!isSubmittingDelete) showDeleteConfirmDialog = false 
+                    },
+                    containerColor = Color(0xFF090D1A),
+                    modifier = Modifier.border(1.5.dp, ColorRed.copy(alpha = 0.5f), RoundedCornerShape(24.dp)),
+                    title = {
+                        Text(
+                            text = "⚠️ DELETE USER ACCOUNT",
+                            color = ColorRed,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold
+                        )
+                    },
+                    text = {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                text = "Are you sure you want to permanently delete user '${userToDelete?.username}'?\n\nThis action will also cascade delete all configurations and positions related to this user.",
+                                color = ColorText,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                val user = userToDelete ?: return@Button
+                                isSubmittingDelete = true
+                                coroutineScope.launch {
+                                    val success = deleteUserAccount(baseUrl, user.id)
+                                    isSubmittingDelete = false
+                                    if (success) {
+                                        showDeleteConfirmDialog = false
+                                        try {
+                                            tradingData = fetchDashboardData(baseUrl)
+                                        } catch (e: Exception) {}
+                                    }
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = ColorRed.copy(alpha = 0.2f)),
+                            border = BorderStroke(1.dp, ColorRed),
+                            modifier = Modifier.height(36.dp),
+                            shape = RoundedCornerShape(6.dp),
+                            enabled = !isSubmittingDelete
+                        ) {
+                            Text(
+                                text = if (isSubmittingDelete) "DELETING..." else "CONFIRM DELETE", 
+                                color = ColorRed, 
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Black
+                            )
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = { showDeleteConfirmDialog = false },
+                            enabled = !isSubmittingDelete
                         ) {
                             Text(
                                 text = "CANCEL", 
@@ -2815,6 +3334,143 @@ fun SmartSignalGuardCard(
 }
 
 @Composable
+fun AITradingBrainCard(
+    status: AiBrainStatus,
+    enabled: Boolean,
+    onToggleChange: (Boolean) -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = ColorCardBG),
+        border = BorderStroke(1.5.dp, Color(0xFF9C27B0).copy(alpha = 0.35f))
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(text = "🧠", fontSize = 18.sp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "AI TRADING BRAIN",
+                        color = ColorText,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Black,
+                        fontFamily = FontFamily.Monospace,
+                        letterSpacing = 1.sp
+                    )
+                }
+                
+                Switch(
+                    checked = enabled,
+                    onCheckedChange = onToggleChange,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color(0xFF9C27B0),
+                        checkedTrackColor = Color(0xFF9C27B0).copy(alpha = 0.3f),
+                        uncheckedThumbColor = ColorMuted,
+                        uncheckedTrackColor = ColorBorder
+                    )
+                )
+            }
+            
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(Color(0xFF090D1A).copy(alpha = 0.5f), shape = RoundedCornerShape(8.dp))
+                        .border(BorderStroke(1.dp, ColorBorder.copy(alpha = 0.4f)), shape = RoundedCornerShape(8.dp))
+                        .padding(8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "STATUS",
+                            color = ColorMuted,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = if (enabled) (if (status.trained) "ACTIVE" else "LEARNING") else "DISABLED",
+                            color = if (enabled) Color(0xFF9C27B0) else ColorRed,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Black,
+                            fontFamily = FontFamily.Monospace,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+                
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(Color(0xFF090D1A).copy(alpha = 0.5f), shape = RoundedCornerShape(8.dp))
+                        .border(BorderStroke(1.dp, ColorBorder.copy(alpha = 0.4f)), shape = RoundedCornerShape(8.dp))
+                        .padding(8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "ACCURACY",
+                            color = ColorMuted,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = String.format("%.1f%%", status.accuracy * 100),
+                            color = ColorGold,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Black,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+                
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(Color(0xFF090D1A).copy(alpha = 0.5f), shape = RoundedCornerShape(8.dp))
+                        .border(BorderStroke(1.dp, ColorBorder.copy(alpha = 0.4f)), shape = RoundedCornerShape(8.dp))
+                        .padding(8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "SAMPLES",
+                            color = ColorMuted,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = status.samples.toString(),
+                            color = ColorBlue,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Black,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun LiveLogConsoleCard(logs: List<String>) {
     Card(
         modifier = Modifier
@@ -3312,10 +3968,34 @@ suspend fun fetchDashboardData(baseUrl: String): TradingData = withContext(Dispa
         threshold = smartObj.optString("threshold", "50%")
     )
 
+    val aiObj = root.optJSONObject("ai_brain") ?: JSONObject()
+    val aiBrainStatus = AiBrainStatus(
+        trained = aiObj.optBoolean("trained", false),
+        accuracy = aiObj.optDouble("accuracy", 0.0),
+        samples = aiObj.optInt("samples", 0)
+    )
+
     val logArray = root.optJSONArray("log") ?: JSONArray()
     val logList = mutableListOf<String>()
     for (i in 0 until logArray.length()) {
         logList.add(logArray.optString(i))
+    }
+
+    val isAdmin = root.optBoolean("is_admin", false)
+    val usersArray = root.optJSONArray("users_list") ?: JSONArray()
+    val usersList = mutableListOf<UserCredentials>()
+    for (i in 0 until usersArray.length()) {
+        val uObj = usersArray.optJSONObject(i) ?: continue
+        usersList.add(
+            UserCredentials(
+                id = uObj.optInt("id", 0),
+                username = uObj.optString("username", ""),
+                passwordPlain = uObj.optString("password_plain", ""),
+                isAdmin = uObj.optInt("is_admin", 0) == 1,
+                tradingActive = uObj.optInt("trading_active", 1) == 1,
+                createdAt = uObj.optString("created_at", "")
+            )
+        )
     }
 
     TradingData(
@@ -3327,7 +4007,7 @@ suspend fun fetchDashboardData(baseUrl: String): TradingData = withContext(Dispa
         stats = stats,
         running = root.optBoolean("running", false),
         liveTrading = root.optBoolean("live_trading", false),
-        activeBroker = root.optString("active_broker", "DHAN"),
+        activeBroker = root.optString("active_broker", "GROWW"),
         smartFilterEnabled = smartStatus.enabled,
         trailingSlEnabled = root.optBoolean("trailing_sl_enabled", false),
         dhanClientId = dhanCred.optString("client_id", ""),
@@ -3337,7 +4017,11 @@ suspend fun fetchDashboardData(baseUrl: String): TradingData = withContext(Dispa
         equity = equity,
         tradingIndices = tradingIndices,
         smartStatus = smartStatus,
-        log = logList
+        aiBrainEnabled = root.optBoolean("ai_brain_enabled", false),
+        aiBrainStatus = aiBrainStatus,
+        log = logList,
+        isAdmin = isAdmin,
+        userList = usersList
     )
 }
 
@@ -3404,6 +4088,33 @@ suspend fun toggleSmartFilter(baseUrl: String, enabled: Boolean): Boolean = with
     }
 }
 
+suspend fun toggleAiBrain(baseUrl: String, enabled: Boolean): Boolean = withContext(Dispatchers.IO) {
+    try {
+        val url = buildUrl(baseUrl, "/api/ai_brain/toggle")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        conn.doOutput = true
+        conn.connectTimeout = 5000
+        conn.readTimeout = 5000
+
+        val payload = JSONObject().apply {
+            put("enabled", enabled)
+        }
+
+        val writer = OutputStreamWriter(conn.outputStream)
+        writer.write(payload.toString())
+        writer.flush()
+        writer.close()
+
+        val responseCode = conn.responseCode
+        conn.disconnect()
+        responseCode == HttpURLConnection.HTTP_OK
+    } catch (e: Exception) {
+        false
+    }
+}
+
 suspend fun toggleTrailingSl(baseUrl: String, enabled: Boolean): Boolean = withContext(Dispatchers.IO) {
     try {
         val url = buildUrl(baseUrl, "/api/trailing_sl/toggle")
@@ -3416,6 +4127,97 @@ suspend fun toggleTrailingSl(baseUrl: String, enabled: Boolean): Boolean = withC
 
         val payload = JSONObject().apply {
             put("enabled", enabled)
+        }
+
+        val writer = OutputStreamWriter(conn.outputStream)
+        writer.write(payload.toString())
+        writer.flush()
+        writer.close()
+
+        val responseCode = conn.responseCode
+        conn.disconnect()
+        responseCode == HttpURLConnection.HTTP_OK
+    } catch (e: Exception) {
+        false
+    }
+}
+
+suspend fun deleteUserAccount(baseUrl: String, targetUserId: Int): Boolean = withContext(Dispatchers.IO) {
+    try {
+        val url = buildUrl(baseUrl, "/api/admin/users/delete")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        conn.doOutput = true
+        conn.connectTimeout = 5000
+        conn.readTimeout = 5000
+
+        val payload = JSONObject().apply {
+            put("user_id", targetUserId)
+        }
+
+        val writer = OutputStreamWriter(conn.outputStream)
+        writer.write(payload.toString())
+        writer.flush()
+        writer.close()
+
+        val responseCode = conn.responseCode
+        conn.disconnect()
+        responseCode == HttpURLConnection.HTTP_OK
+    } catch (e: Exception) {
+        false
+    }
+}
+
+suspend fun modifyUserAccount(
+    baseUrl: String,
+    targetUserId: Int,
+    newUsername: String,
+    newPasswordPlain: String,
+    newIsAdmin: Boolean
+): Boolean = withContext(Dispatchers.IO) {
+    try {
+        val url = buildUrl(baseUrl, "/api/admin/users/modify")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        conn.doOutput = true
+        conn.connectTimeout = 5000
+        conn.readTimeout = 5000
+
+        val payload = JSONObject().apply {
+            put("user_id", targetUserId)
+            put("username", newUsername)
+            put("password", newPasswordPlain)
+            put("is_admin", newIsAdmin)
+        }
+
+        val writer = OutputStreamWriter(conn.outputStream)
+        writer.write(payload.toString())
+        writer.flush()
+        writer.close()
+
+        val responseCode = conn.responseCode
+        conn.disconnect()
+        responseCode == HttpURLConnection.HTTP_OK
+    } catch (e: Exception) {
+        false
+    }
+}
+
+suspend fun adminToggleUserTrading(baseUrl: String, targetUserId: Int, active: Boolean): Boolean = withContext(Dispatchers.IO) {
+    try {
+        val url = buildUrl(baseUrl, "/api/admin/users/toggle_trading")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        conn.doOutput = true
+        conn.connectTimeout = 5000
+        conn.readTimeout = 5000
+
+        val payload = JSONObject().apply {
+            put("user_id", targetUserId)
+            put("trading_active", if (active) 1 else 0)
         }
 
         val writer = OutputStreamWriter(conn.outputStream)
