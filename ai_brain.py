@@ -28,6 +28,13 @@ except ImportError:
     nn = None
     optim = None
 
+if nn is not None:
+    nn_Module = nn.Module
+else:
+    class DummyModule:
+        pass
+    nn_Module = DummyModule
+
 from db_helper import DB_PATH, get_db_connection
 
 log = logging.getLogger("ai_brain")
@@ -39,7 +46,8 @@ class SignalType(Enum):
 
 # PyTorch Deep Neural Network Architecture
 if torch is not None and nn is not None:
-    class DeepTradingModel(nn.Module):
+    class DeepTradingModel(nn_Module):
+
         def __init__(self, input_dim: int = 4, hidden_dims: list = [64, 32, 16], output_dim: int = 3, dropout_rate: float = 0.1):
             super().__init__()
             layers = []
@@ -61,7 +69,14 @@ else:
             pass
         def __call__(self, *args, **kwargs):
             pass
+        def parameters(self):
+            return []
+        def train(self, mode: bool = True):
+            pass
+        def eval(self):
+            pass
     DeepTradingModel = DummyDeepTradingModel
+
 
 
 class AITradingBrain:
@@ -174,28 +189,30 @@ class AITradingBrain:
                 y_tensor = torch.tensor(torch_targets, dtype=torch.long)
 
                 # Instantiate PyTorch deep learning model
-                self.model = DeepTradingModel(input_dim=4, hidden_dims=[64, 32, 16], output_dim=3)
+                model = DeepTradingModel(input_dim=4, hidden_dims=[64, 32, 16], output_dim=3)
+                self.model = model
                 
                 criterion = nn.CrossEntropyLoss()
-                optimizer = optim.Adam(self.model.parameters(), lr=0.01)
+                optimizer = optim.Adam(model.parameters(), lr=0.01)
 
-                self.model.train()
+                model.train()
                 for epoch in range(250):
                     optimizer.zero_grad()
-                    outputs = self.model(X_tensor)
+                    outputs = model(X_tensor)
                     loss = criterion(outputs, y_tensor)
                     loss.backward()
                     optimizer.step()
 
-                self.model.eval()
+                model.eval()
                 with torch.no_grad():
-                    preds = self.model(X_tensor)
+                    preds = model(X_tensor)
                     pred_classes = torch.argmax(preds, dim=1)
                     correct = (pred_classes == y_tensor).sum().item()
                     self.training_accuracy = (correct / len(y)) * 100
 
                 self.is_trained = True
                 log.info(f"[AI] PyTorch Deep Learning model trained for user {self.user_id} on {self.total_samples} samples. Accuracy: {self.training_accuracy:.2f}%")
+
 
             elif MLPClassifier is not None:
                 # Fallback to a deep scikit-learn MLPClassifier
@@ -204,7 +221,7 @@ class AITradingBrain:
                 self.model.fit(X_scaled, y)
                 
                 self.is_trained = True
-                self.training_accuracy = self.model.score(X_scaled, y) * 100
+                self.training_accuracy = float(self.model.score(X_scaled, y) * 100)
                 log.info(f"[AI] Fallback Deep MLPClassifier model trained for user {self.user_id} on {self.total_samples} samples. Accuracy: {self.training_accuracy:.2f}%")
             else:
                 log.error("[AI] Neither PyTorch nor scikit-learn is available for training.")
@@ -225,7 +242,7 @@ class AITradingBrain:
             features_scaled = self.scaler.transform(features)
 
             # Inference using PyTorch if applicable
-            if torch is not None and isinstance(self.model, nn.Module):
+            if torch is not None and isinstance(self.model, nn_Module):
                 self.model.eval()
                 with torch.no_grad():
                     features_tensor = torch.tensor(features_scaled, dtype=torch.float32)
