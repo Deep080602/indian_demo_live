@@ -199,7 +199,7 @@ class AITradingBrain:
 
                 model.eval()
                 with torch.no_grad():
-                    preds = model(X_tensor)
+                    preds: torch.Tensor = model(X_tensor)
                     pred_classes = torch.argmax(preds, dim=1)
                     correct = (pred_classes == y_tensor).sum().item()
                     self.training_accuracy = (correct / len(y)) * 100
@@ -240,7 +240,7 @@ class AITradingBrain:
                 self.model.eval()
                 with torch.no_grad():
                     features_tensor = torch.tensor(features_scaled, dtype=torch.float32)
-                    outputs = self.model(features_tensor)
+                    outputs: torch.Tensor = self.model(features_tensor)
                     prediction = torch.argmax(outputs, dim=1).item()
 
                 if prediction == 1:
