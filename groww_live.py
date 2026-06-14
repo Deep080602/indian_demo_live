@@ -58,7 +58,16 @@ def place_groww_order(sec_id: str, action: str, quantity: int, index: str, clien
             )
             
         log.info(f"[GROWW] Place order response: {order_resp}")
-        if order_resp.get("status") == "success" or "orderId" in str(order_resp) or "groww_order_id" in order_resp:
+        is_success = False
+        if order_resp:
+            status_val = str(order_resp.get("status", "")).lower()
+            order_status = str(order_resp.get("order_status", "")).lower()
+            if status_val == "success" or "orderid" in str(order_resp).lower() or "groww_order_id" in order_resp:
+                is_success = True
+            elif order_status in ("open", "success", "executed", "complete"):
+                is_success = True
+                
+        if is_success:
             # Parse order ID correctly by checking root keys first
             order_id = str(order_resp.get("groww_order_id") or order_resp.get("orderId") or "")
             if not order_id:
@@ -70,10 +79,11 @@ def place_groww_order(sec_id: str, action: str, quantity: int, index: str, clien
                 log.info(f"[GROWW] ✅ Live order placed successfully! OrderID: {order_id}")
                 return order_id
             else:
-                log.error("[GROWW] ❌ Placed order but orderId / groww_order_id could not be parsed.")
+                raise RuntimeError("Order placed, but could not parse groww_order_id / orderId from response.")
         else:
-            remarks = order_resp.get("remarks", order_resp.get("remark", "Unknown error"))
-            log.error(f"[GROWW] ❌ Live order placement failed: {remarks}.")
+            remarks = order_resp.get("remarks") or order_resp.get("remark") or order_resp.get("message") or order_resp.get("error") or "Unknown Groww API error"
+            raise RuntimeError(remarks)
+            
     except Exception as e:
         err_msg = str(e)
         if "unregistered IP" in err_msg or "No registered IPs" in err_msg or "registered IP" in err_msg:
@@ -86,6 +96,7 @@ def place_groww_order(sec_id: str, action: str, quantity: int, index: str, clien
                 f"[GROWW] ❌ IP ADDRESS NOT REGISTERED: You must register your public IP address in the Groww Cloud developer console. "
                 f"Go to https://groww.in/trade-api/api-keys and add your public IP address: {public_ip}"
             )
+            raise RuntimeError(f"IP address {public_ip} not registered in Groww API portal.")
         else:
             log.error(f"[GROWW] ❌ Exception placing live order: {e}.")
-    return None
+            raise

@@ -54,18 +54,6 @@ def init_db():
         except sqlite3.OperationalError:
             pass
             
-        # Ensure default admin user exists
-        c.execute("SELECT id FROM users WHERE username = 'admin'")
-        if not c.fetchone():
-            admin_pwd = "Madhab150972@#"
-            pwd_hash = hashlib.sha256(admin_pwd.encode('utf-8')).hexdigest()
-            created_at = datetime.now().isoformat()
-            c.execute("INSERT INTO users (username, password_hash, password_plain, is_admin, created_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?)",
-                      ("admin", pwd_hash, admin_pwd, 1, created_at, created_at))
-            admin_id = c.lastrowid
-            c.execute("INSERT INTO user_config (user_id) VALUES (?)", (admin_id,))
-
-        
         # User config table
         c.execute('''
             CREATE TABLE IF NOT EXISTS user_config (
@@ -89,6 +77,17 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
         ''')
+        
+        # Ensure default admin user exists
+        c.execute("SELECT id FROM users WHERE username = 'admin'")
+        if not c.fetchone():
+            admin_pwd = "Madhab150972@#"
+            pwd_hash = hashlib.sha256(admin_pwd.encode('utf-8')).hexdigest()
+            created_at = datetime.now().isoformat()
+            c.execute("INSERT INTO users (username, password_hash, password_plain, is_admin, created_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?)",
+                      ("admin", pwd_hash, admin_pwd, 1, created_at, created_at))
+            admin_id = c.lastrowid
+            c.execute("INSERT INTO user_config (user_id) VALUES (?)", (admin_id,))
         
         # Positions table
         c.execute('''
@@ -116,8 +115,8 @@ def init_db():
                 exit_time TEXT,
                 exit_reason TEXT DEFAULT '',
                 pnl REAL DEFAULT 0.0,
-                dhan_order_id TEXT DEFAULT '',
-                dhan_sec_id TEXT DEFAULT '',
+                groww_order_id TEXT DEFAULT '',
+                groww_sec_id TEXT DEFAULT '',
                 broker TEXT DEFAULT 'GROWW',
                 entry_charges REAL DEFAULT 0.0,
                 exit_charges REAL DEFAULT 0.0,
@@ -147,6 +146,21 @@ def init_db():
             pass
         try:
             c.execute("ALTER TABLE positions ADD COLUMN client_id TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            c.execute("ALTER TABLE positions ADD COLUMN groww_order_id TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            c.execute("ALTER TABLE positions ADD COLUMN groww_sec_id TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+            
+        # Copy data from legacy columns to new ones if they exist
+        try:
+            c.execute("UPDATE positions SET groww_order_id = dhan_order_id WHERE (groww_order_id = '' OR groww_order_id IS NULL) AND (dhan_order_id != '' AND dhan_order_id IS NOT NULL)")
+            c.execute("UPDATE positions SET groww_sec_id = dhan_sec_id WHERE (groww_sec_id = '' OR groww_sec_id IS NULL) AND (dhan_sec_id != '' AND dhan_sec_id IS NOT NULL)")
         except sqlite3.OperationalError:
             pass
             
@@ -276,7 +290,7 @@ def save_position(user_id, pos) -> bool:
                 INSERT OR REPLACE INTO positions (
                     tid, user_id, client_id, index_name, direction, strike, opt, expiry, lots, contracts,
                     entry, sl, tp, entry_time, entry_spot, e9_15, e21_15, cur, peak,
-                    exit_px, exit_time, exit_reason, pnl, dhan_order_id, dhan_sec_id, broker,
+                    exit_px, exit_time, exit_reason, pnl, groww_order_id, groww_sec_id, broker,
                     entry_charges, exit_charges, charges, brokerage, gst, stt, stamp_duty,
                     exchange_charges, sebi_fee, vix, atr_pct, guard_status, predicted_win_prob,
                     is_super_order, trailing_sl_enabled, is_open, is_live
@@ -293,7 +307,7 @@ def save_position(user_id, pos) -> bool:
                 pos.entry, pos.sl, pos.tp, pos.entry_time.isoformat() if isinstance(pos.entry_time, datetime) else pos.entry_time,
                 pos.entry_spot, pos.e9_15, pos.e21_15, pos.cur, pos.peak,
                 pos.exit_px, pos.exit_time.isoformat() if isinstance(pos.exit_time, datetime) else pos.exit_time,
-                pos.exit_reason, pos.pnl, pos.dhan_order_id, pos.dhan_sec_id, pos.broker,
+                pos.exit_reason, pos.pnl, pos.groww_order_id, pos.groww_sec_id, pos.broker,
                 pos.entry_charges, pos.exit_charges, pos.charges, pos.brokerage, pos.gst, pos.stt, pos.stamp_duty,
                 pos.exchange_charges, pos.sebi_fee, pos.vix, pos.atr_pct, pos.guard_status, pos.predicted_win_prob,
                 1 if pos.is_super_order else 0, 1 if pos.trailing_sl_enabled else 0, 1 if pos.is_open else 0,
@@ -446,7 +460,7 @@ def get_all_users() -> list:
             c = conn.cursor()
             c.execute("""
                 SELECT u.id, u.username, u.password_plain, u.is_admin, u.created_at, u.last_login_at, 
-                       uc.trading_active, uc.groww_client_id, uc.active_broker, uc.live_trading 
+                       uc.trading_active, uc.groww_client_id, uc.active_broker, uc.live_trading, uc.capital 
                 FROM users u
                 LEFT JOIN user_config uc ON u.id = uc.user_id
             """)
@@ -454,6 +468,18 @@ def get_all_users() -> list:
             res = []
             for r in rows:
                 d = dict(r)
+                user_id = d["id"]
+                live_trading = bool(d.get("live_trading", 0))
+                
+                # Fetch sum of P&L from closed positions for this user
+                c2 = conn.cursor()
+                c2.execute("SELECT sum(pnl) FROM positions WHERE user_id = ? AND is_open = 0 AND is_live = ?", (user_id, 1 if live_trading else 0))
+                pnl_row = c2.fetchone()
+                total_pnl = pnl_row[0] if (pnl_row and pnl_row[0] is not None) else 0.0
+                
+                d["capital"] = d.get("capital") if d.get("capital") is not None else 200000.0
+                d["total_pnl"] = round(total_pnl, 2)
+                
                 if d.get("created_at"):
                     try:
                         # Format date to normal format YYYY-MM-DD HH:MM:SS

@@ -9,6 +9,11 @@ Multi-Index: Trade NIFTY and SENSEX simultaneously with split capital (Rs.100k e
 
 import csv, json, logging, math, os, re, signal, subprocess, sys, threading, time
 
+# Ensure working directory is set to the script's directory so relative paths (like logs/) resolve correctly
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+if _script_dir:
+    os.chdir(_script_dir)
+
 if sys.stdout is not None:
     _reconfig_out = getattr(sys.stdout, "reconfigure", None)
     if _reconfig_out is not None:
@@ -478,7 +483,7 @@ def api_data():
                 net_pnl = round(gross_pnl - total_chg_est, 2)
                 pnl_pct = round((net_pnl / p.cost * 100) if p.cost else 0, 2)
                 
-                contract_sym = getattr(p, 'dhan_sec_id', '') or ''
+                contract_sym = getattr(p, 'groww_sec_id', '') or ''
                 if not contract_sym:
                     contract_sym = f"{p.index} {int(p.strike)} {p.opt}"
                     
@@ -879,7 +884,7 @@ def api_mode():
         book.sync_live_positions()
         for index in list(book.open.keys()):
             for tid, p in list(book.open[index].items()):
-                if not p.dhan_order_id or p.broker == "MOCK" or p.dhan_order_id.startswith("MOCK"):
+                if not p.groww_order_id or p.broker == "MOCK" or p.groww_order_id.startswith("MOCK"):
                     log.info(f"[MODE SWITCH] 🔄 [{book.username}] Carry-over: Punching active demo position {p.tid} ({p.strike} {p.opt}) to live broker...")
                     sec_id = ""
                     if book.active_broker == "GROWW" and book.groww_client:
@@ -893,19 +898,19 @@ def api_mode():
                     live_order_id = ""
                     try:
                         if book.active_broker == "GROWW":
-                            live_order_id = place_groww_order(sec_id, "BUY", p.contracts, p.index, client=book.groww_client)
+                            live_order_id = place_groww_order(sec_id, "BUY", p.contracts, p.index, client=book.groww_client) or ""
                     except Exception as punch_err:
                         log.error(f"[MODE SWITCH] ❌ [{book.username}] Exception punching order for {p.tid}: {punch_err}")
                         
                     if live_order_id:
-                        p.dhan_order_id = live_order_id
-                        p.dhan_sec_id = sec_id
+                        p.groww_order_id = live_order_id
+                        p.groww_sec_id = sec_id
                         p.broker = book.active_broker
                         db_helper.save_position(user_id, p)
                         log.info(f"[MODE SWITCH] ✅ [{book.username}] Successfully carried position {p.tid} to live broker! OrderID: {live_order_id}")
                     else:
-                        p.dhan_order_id = f"REJECTED_{_now().strftime('%H%M%S')}"
-                        p.dhan_sec_id = sec_id
+                        p.groww_order_id = f"REJECTED_{_now().strftime('%H%M%S')}"
+                        p.groww_sec_id = sec_id
                         p.broker = book.active_broker
                         db_helper.save_position(user_id, p)
                         log.warning(f"[MODE SWITCH] ⚠️ [{book.username}] Live order rejected or failed for {p.tid}.")
@@ -1253,8 +1258,8 @@ def api_place_manual_trade():
         expiry = ExpiryManager(index).get_expiry()
         
         # Place live order if live trading is active, else create mock order ID
-        dhan_order_id = ""
-        dhan_sec_id = ""
+        groww_order_id = ""
+        groww_sec_id = ""
         broker_name = "GROWW"
         is_super = False
         
@@ -1267,11 +1272,11 @@ def api_place_manual_trade():
                 sec_id = f"GRW_SEC_{int(strike)}_{opt}"
             
             # Place live order
-            dhan_order_id = place_groww_order(sec_id, "BUY", contracts, index, client=book.groww_client)
-                
-            if not dhan_order_id:
-                return jsonify({"status": "error", "message": "Live order placement failed"}), 500
-            dhan_sec_id = sec_id
+            try:
+                groww_order_id = place_groww_order(sec_id, "BUY", contracts, index, client=book.groww_client) or ""
+            except Exception as e:
+                return jsonify({"status": "error", "message": f"Live order placement failed: {e}"}), 400
+            groww_sec_id = sec_id
             
         # Create position object
         book._n += 1
@@ -1281,7 +1286,7 @@ def api_place_manual_trade():
         entry_bd = calculate_charges_breakdown(entry, contracts, is_buy=True, index=index)
         spot_val = _get_nse_spot(index) or entry
         client_id_val = book.groww_client_id if book.live_trading else ""
-
+ 
         p = Pos(
             tid=tid, index=index, user_id=user_id, client_id=client_id_val, is_open=True, direction="CALL" if opt == "CE" else "PUT",
             strike=strike, opt=opt, expiry=expiry,
@@ -1290,7 +1295,7 @@ def api_place_manual_trade():
             entry_time=_now(), entry_spot=spot_val,
             e9_15=0.0, e21_15=0.0,
             cur=entry, peak=entry,
-            dhan_order_id=dhan_order_id, dhan_sec_id=dhan_sec_id,
+            groww_order_id=groww_order_id, groww_sec_id=groww_sec_id,
             broker=broker_name,
             entry_charges=entry_bd["total"],
             charges=entry_bd["total"],
@@ -2493,8 +2498,8 @@ class Pos:
     exit_time:  Optional[datetime] = None
     exit_reason:str   = ""
     pnl:        float = 0.0
-    dhan_order_id: str = ""
-    dhan_sec_id:   str = ""
+    groww_order_id: str = ""
+    groww_sec_id:   str = ""
     broker:        str = "GROWW"
     entry_charges: float = 0.0
     exit_charges:  float = 0.0
@@ -2526,7 +2531,7 @@ def _get_live_position_ltp(p: 'Pos', client = None, live_trading = False) -> flo
     try:
         broker_name = getattr(p, "broker", "GROWW")
         if broker_name == "GROWW":
-            contract_id = p.dhan_sec_id or p.dhan_order_id
+            contract_id = p.groww_sec_id or p.groww_order_id
             if contract_id and not contract_id.startswith("MOCK") and not contract_id.startswith("SYNC"):
                 return _get_groww_contract_ltp(contract_id)
     except Exception as e:
@@ -2606,7 +2611,7 @@ class Book:
                 entry_time=pos_dict["entry_time"], entry_spot=pos_dict["entry_spot"],
                 e9_15=pos_dict["e9_15"], e21_15=pos_dict["e21_15"],
                 cur=pos_dict["cur"], peak=pos_dict["peak"],
-                dhan_order_id=pos_dict["dhan_order_id"], dhan_sec_id=pos_dict["dhan_sec_id"],
+                groww_order_id=pos_dict.get("groww_order_id", ""), groww_sec_id=pos_dict.get("groww_sec_id", ""),
                 broker=pos_dict["broker"],
                 entry_charges=pos_dict["entry_charges"], exit_charges=pos_dict["exit_charges"],
                 charges=pos_dict["charges"], brokerage=pos_dict["brokerage"],
@@ -2635,7 +2640,7 @@ class Book:
                 cur=pos_dict["cur"], peak=pos_dict["peak"],
                 exit_px=pos_dict["exit_px"], exit_time=pos_dict["exit_time"],
                 exit_reason=pos_dict["exit_reason"], pnl=pos_dict["pnl"],
-                dhan_order_id=pos_dict["dhan_order_id"], dhan_sec_id=pos_dict["dhan_sec_id"],
+                groww_order_id=pos_dict.get("groww_order_id", ""), groww_sec_id=pos_dict.get("groww_sec_id", ""),
                 broker=pos_dict["broker"],
                 entry_charges=pos_dict["entry_charges"], exit_charges=pos_dict["exit_charges"],
                 charges=pos_dict["charges"], brokerage=pos_dict["brokerage"],
@@ -2796,8 +2801,8 @@ class Book:
             prob_pct_val = prob_pct
 
         # Resolve dynamic contract and execute live order if live trading is active
-        dhan_order_id = ""
-        dhan_sec_id = ""
+        groww_order_id = ""
+        groww_sec_id = ""
         broker_name = "GROWW"
         is_super = False
         if self.live_trading:
@@ -2809,12 +2814,12 @@ class Book:
                 sec_id = f"GRW_SEC_{int(sig['strike'])}_{sig['opt']}"
                 
             # Place live order
-            dhan_order_id = place_groww_order(sec_id, "BUY", contracts, index, client=self.groww_client)
-                
-            if not dhan_order_id:
-                log.error(f"[{broker_name}] [{self.username}] ❌ Live order placement failed. Aborting entry.")
+            try:
+                groww_order_id = place_groww_order(sec_id, "BUY", contracts, index, client=self.groww_client) or ""
+            except Exception as e:
+                log.error(f"[{broker_name}] [{self.username}] ❌ Live order placement failed: {e}. Aborting entry.")
                 return None
-            dhan_sec_id = sec_id
+            groww_sec_id = sec_id
 
         self._n  += 1
         display_index = index
@@ -2833,7 +2838,7 @@ class Book:
             entry_time=_now(), entry_spot=spot_val,
             e9_15=float(sig.get("e9_15") or 0.0), e21_15=float(sig.get("e21_15") or 0.0),
             cur=float(sig["entry"]), peak=float(sig["entry"]),
-            dhan_order_id=dhan_order_id, dhan_sec_id=dhan_sec_id,
+            groww_order_id=groww_order_id, groww_sec_id=groww_sec_id,
             broker=broker_name,
             entry_charges=entry_bd["total"],
             charges=entry_bd["total"],
@@ -2907,7 +2912,7 @@ class Book:
                     found = False
                     for idx in list(self.open.keys()):
                         for tid, p in list(self.open[idx].items()):
-                            if p.dhan_sec_id == symbol or p.dhan_order_id == symbol:
+                            if p.groww_sec_id == symbol or p.groww_order_id == symbol:
                                 found = True
                                 break
                                 
@@ -2940,7 +2945,7 @@ class Book:
                                 strike=strike, opt=opt, expiry=expiry, lots=lots, contracts=contracts,
                                 entry=entry_px, sl=sl, tp=tp, entry_time=_now(), entry_spot=strike,
                                 e9_15=0.0, e21_15=0.0, cur=entry_px, peak=entry_px,
-                                dhan_order_id=bp.get("groww_order_id", f"SYNC_{symbol}"), dhan_sec_id=symbol,
+                                groww_order_id=bp.get("groww_order_id", f"SYNC_{symbol}"), groww_sec_id=symbol,
                                 broker="GROWW", vix=_get_cached_vix(), atr_pct=0.005,
                                 is_super_order=False, trailing_sl_enabled=self.trailing_sl_enabled,
                                 is_live=self.live_trading
@@ -2952,9 +2957,9 @@ class Book:
                 # Reconcile closed positions
                 for idx in list(self.open.keys()):
                     for tid, p in list(self.open[idx].items()):
-                        if p.broker == "GROWW" and p.dhan_sec_id and p.dhan_sec_id not in active_symbols:
-                            if not p.dhan_order_id.startswith("MOCK"):
-                                log.info(f"[SYNC] 📤 Closing position {p.tid} ({p.dhan_sec_id}) for {self.username} (external exit).")
+                        if p.broker == "GROWW" and p.groww_sec_id and p.groww_sec_id not in active_symbols:
+                            if not p.groww_order_id.startswith("MOCK"):
+                                log.info(f"[SYNC] 📤 Closing position {p.tid} ({p.groww_sec_id}) for {self.username} (external exit).")
                                 self._close(p, p.cur, "EXTERNAL_EXIT")
             except Exception as e:
                 log.error(f"[SYNC] Error syncing Groww positions for {self.username}: {e}")
@@ -3005,8 +3010,11 @@ class Book:
             return p
 
         # Offsetting sell order
-        if p.dhan_order_id and p.dhan_sec_id:
-            place_groww_order(p.dhan_sec_id, "SELL", p.contracts, index, client=self.groww_client)
+        if p.groww_order_id and p.groww_sec_id:
+            try:
+                place_groww_order(p.groww_sec_id, "SELL", p.contracts, index, client=self.groww_client)
+            except Exception as e:
+                log.error(f"[GROWW] [{self.username}] ❌ Failed to place offsetting SELL order for {p.tid}: {e}")
 
         p.exit_px    = exit_px
         p.exit_time  = _now()
@@ -3093,8 +3101,8 @@ class Book:
 # ─── MAIN ──────────────────────────────────────────────────────────────────────
 def run():
     global _running, vix
-    check_and_clear_expired_credentials()
     db_helper.init_db()
+    check_and_clear_expired_credentials()
     _start_dashboard()
 
     log.info("=" * 60)
@@ -4649,6 +4657,36 @@ input:checked + .slider:before {
 :root.light .mc.teal .mc-val { color: #0f766e; text-shadow: none; }
 :root.light .mc.orange .mc-val { color: #ea580c; text-shadow: none; }
 
+/* 3D User Stats Card Styles */
+.user-stats-3d-card {
+  background: linear-gradient(135deg, rgba(20, 24, 46, 0.9) 0%, rgba(9, 13, 26, 0.95) 100%);
+  border: 1.5px solid rgba(124, 77, 255, 0.35);
+  box-shadow: 0 25px 60px rgba(0,0,0,0.7), 0 0 30px rgba(124, 77, 255, 0.2), inset 0 0 15px rgba(255, 255, 255, 0.02);
+  border-radius: 24px;
+  padding: 32px;
+  position: relative;
+  transition: transform 0.15s ease-out, border-color 0.2s ease, box-shadow 0.2s ease;
+  transform-style: preserve-3d;
+  backface-visibility: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.user-stats-3d-card:hover {
+  border-color: rgba(0, 240, 255, 0.6) !important;
+  box-shadow: 0 35px 70px rgba(0,0,0,0.85), 0 0 40px rgba(0, 240, 255, 0.35) !important;
+}
+
+#statsCardGlow {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  background: radial-gradient(circle at var(--x, 50%) var(--y, 50%), rgba(0, 240, 255, 0.1) 0%, transparent 60%);
+  border-radius: 24px;
+  z-index: 1;
+}
 </style>
 </head>
 <body>
@@ -5871,7 +5909,7 @@ async function load(){
                 
               return `
               <tr>
-                <td style="font-family:'JetBrains Mono',monospace;font-weight:700;color:#ebd9fc;padding:8px;">${safeUsername}</td>
+                <td style="font-family:'JetBrains Mono',monospace;font-weight:700;color:#ebd9fc;padding:8px;cursor:pointer;text-decoration:underline;text-decoration-style:dashed;" onclick="showUserStatsCard('${safeUsername}', ${u.capital || 200000.0}, ${u.total_pnl || 0.0})" title="Click to view 3D Stats Card">${safeUsername}</td>
                 <td style="font-family:'JetBrains Mono',monospace;color:#00f0ff;font-weight:700;padding:8px;">${safePasswordPlain || '—'}</td>
                 <td style="padding:8px;"><span class="badge ${u.is_admin ? 'call' : 'put'}">${u.is_admin ? 'ADMIN' : 'USER'}</span></td>
                 <td style="font-size:11px;color:var(--muted);padding:8px;">${u.created_at || '—'}</td>
@@ -6393,6 +6431,7 @@ window.onclick = function(event) {
   const capModal = document.getElementById('capitalModal');
   const resetConfirmModal = document.getElementById('resetConfirmModal');
   const sqModal = document.getElementById('squareoffSelectModal');
+  const statsModal = document.getElementById('userStatsModal');
   if (event.target == modal) {
     modal.style.display = 'none';
   }
@@ -6404,6 +6443,9 @@ window.onclick = function(event) {
   }
   if (event.target == sqModal) {
     sqModal.style.display = 'none';
+  }
+  if (event.target == statsModal) {
+    closeUserStatsModal();
   }
 }
 
@@ -6944,6 +6986,201 @@ function toggleTheme() {
   updateChartColors();
 }
 
+// ============================================================================
+//                 3D USER PORTFOLIO CARD & SPACE SIMULATION
+// ============================================================================
+
+let spaceAnimationId = null;
+
+function showUserStatsCard(username, capital, totalPnl) {
+  const modal = document.getElementById('userStatsModal');
+  const card = document.getElementById('userStatsCard');
+  if (!modal || !card) return;
+
+  // Display Username
+  document.getElementById('statsCardUsername').textContent = escapeHtml(username);
+
+  const capVal = parseFloat(capital) || 0;
+  const pnlVal = parseFloat(totalPnl) || 0;
+
+  // 1. Allocated Capital calculation: Initial Capital = Current Balance - Cumulative P&L
+  const initialCapital = capVal - pnlVal;
+  document.getElementById('statsCardCapital').textContent = '₹' + new Intl.NumberFormat('en-IN').format(Math.round(initialCapital));
+
+  // 2. Realized P&L configuration: styling, neon borders, and drop shadows
+  const pnlEl = document.getElementById('statsCardPnl');
+  const pnlBox = document.getElementById('statsCardPnlBox');
+  const pnlLabel = document.getElementById('statsCardPnlLabel');
+
+  const sign = pnlVal >= 0 ? '+' : '';
+  const pnlFormatted = sign + '₹' + new Intl.NumberFormat('en-IN').format(Math.round(pnlVal));
+  pnlEl.textContent = pnlFormatted;
+
+  if (pnlVal >= 0) {
+    pnlEl.style.color = 'var(--green)';
+    pnlEl.style.textShadow = '0 0 4px rgba(0, 255, 136, 0.3)';
+    pnlBox.style.borderColor = 'rgba(0, 255, 136, 0.35)';
+    pnlBox.style.background = 'rgba(0, 255, 136, 0.04)';
+    pnlLabel.style.color = 'var(--green)';
+  } else {
+    pnlEl.style.color = 'var(--red)';
+    pnlEl.style.textShadow = '0 0 4px rgba(255, 68, 68, 0.3)';
+    pnlBox.style.borderColor = 'rgba(255, 68, 68, 0.35)';
+    pnlBox.style.background = 'rgba(255, 68, 68, 0.04)';
+    pnlLabel.style.color = 'var(--red)';
+  }
+
+  // 3. Current Net Balance (Updated balance = Current capital from DB)
+  document.getElementById('statsCardBalance').textContent = '₹' + new Intl.NumberFormat('en-IN').format(Math.round(capVal));
+
+  // Set initial 3D transform rotation to none for maximum text clarity
+  card.style.transform = 'none';
+
+  // Open modal
+  modal.style.display = 'flex';
+
+  // Start space animation
+  startSpaceTravelSimulation();
+}
+
+function closeUserStatsModal() {
+  const modal = document.getElementById('userStatsModal');
+  if (modal) {
+    modal.style.display = 'none';
+  }
+  stopSpaceTravelSimulation();
+}
+
+function startSpaceTravelSimulation() {
+  const canvas = document.getElementById('statsCardSpaceCanvas');
+  if (!canvas) return;
+
+  const ctx = canvas.getContext('2d');
+
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  const numStars = 150;
+  const stars = [];
+  const maxDepth = 1000;
+  const fov = 280;
+
+  for (let i = 0; i < numStars; i++) {
+    stars.push({
+      x: (Math.random() - 0.5) * canvas.width * 2,
+      y: (Math.random() - 0.5) * canvas.height * 2,
+      z: Math.random() * maxDepth,
+      color: ['#00f0ff', '#7c4dff', '#ff007f', '#00e5ff', '#ffffff', '#ebd9fc'][Math.floor(Math.random() * 6)]
+    });
+  }
+
+  function animate() {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.12)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const centerX = canvas.width / 2;
+    const centerY = canvas.height / 2;
+
+    for (let i = 0; i < numStars; i++) {
+      const star = stars[i];
+      const prevZ = star.z;
+
+      star.z -= 0.8;
+      if (star.z <= 0) {
+        star.x = (Math.random() - 0.5) * canvas.width * 2;
+        star.y = (Math.random() - 0.5) * canvas.height * 2;
+        star.z = maxDepth;
+        continue;
+      }
+
+      const px = (star.x / star.z) * fov + centerX;
+      const py = (star.y / star.z) * fov + centerY;
+
+      const ppx = (star.x / prevZ) * fov + centerX;
+      const ppy = (star.y / prevZ) * fov + centerY;
+
+      if (px >= 0 && px <= canvas.width && py >= 0 && py <= canvas.height) {
+        const speedAlpha = 1 - (star.z / maxDepth);
+        ctx.strokeStyle = star.color;
+        ctx.lineWidth = 1.2 * speedAlpha + 0.3;
+        ctx.beginPath();
+        ctx.moveTo(ppx, ppy);
+        ctx.lineTo(px, py);
+        ctx.stroke();
+      }
+    }
+
+    spaceAnimationId = requestAnimationFrame(animate);
+  }
+
+  if (spaceAnimationId) {
+    cancelAnimationFrame(spaceAnimationId);
+  }
+  animate();
+}
+
+function stopSpaceTravelSimulation() {
+  if (spaceAnimationId) {
+    cancelAnimationFrame(spaceAnimationId);
+    spaceAnimationId = null;
+  }
+}
+
+// 3D Tilt and Glow tracking setup
+document.addEventListener('DOMContentLoaded', () => {
+  const card = document.getElementById('userStatsCard');
+  const glow = document.getElementById('statsCardGlow');
+  
+  if (card) {
+    card.addEventListener('mousemove', (e) => {
+      const rect = card.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      
+      const xc = ((x / rect.width) - 0.5);
+      const yc = ((y / rect.height) - 0.5);
+      
+      const tiltX = (yc * -22).toFixed(2);
+      const tiltY = (xc * 22).toFixed(2);
+      
+      card.style.transform = `rotateX(${tiltX}deg) rotateY(${tiltY}deg)`;
+      
+      if (glow) {
+        const glowX = ((x / rect.width) * 100).toFixed(1);
+        const glowY = ((y / rect.height) * 100).toFixed(1);
+        glow.style.setProperty('--x', `${glowX}%`);
+        glow.style.setProperty('--y', `${glowY}%`);
+      }
+    });
+    
+    card.addEventListener('mouseleave', () => {
+      card.style.transform = 'none';
+      if (glow) {
+        glow.style.setProperty('--x', '50%');
+        glow.style.setProperty('--y', '50%');
+      }
+    });
+  }
+});
+
+// Global Escape Key Listener for closing all modals
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    closeUserStatsModal();
+    closeChargesModal();
+    const capModal = document.getElementById('capitalModal');
+    if (capModal) capModal.style.display = 'none';
+    const resetConfirmModal = document.getElementById('resetConfirmModal');
+    if (resetConfirmModal) resetConfirmModal.style.display = 'none';
+    const sqModal = document.getElementById('squareoffSelectModal');
+    if (sqModal) sqModal.style.display = 'none';
+  }
+});
+
 checkAuthStatus();
 </script>
 
@@ -7125,6 +7362,46 @@ checkAuthStatus();
       <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:4px;">
         <button onclick="closeModifyUserModal()" style="background:transparent; border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:10px 18px; color:var(--muted); font-size:12.5px; font-weight:700; cursor:pointer; transition:all 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.03)'; this.style.color='#fff';" onmouseout="this.style.background='transparent'; this.style.color='var(--muted)';">Cancel</button>
         <button onclick="submitModifyUser()" style="background:linear-gradient(135deg, #00b0ff, #00e5ff); border:none; border-radius:8px; padding:10px 22px; color:#060b18; font-size:12.5px; font-weight:800; cursor:pointer; transition:transform 0.2s, brightness 0.2s; box-shadow:0 0 15px rgba(0, 240, 255, 0.35);" onmouseover="this.style.transform='translateY(-1px)'; this.style.filter='brightness(1.1)';" onmouseout="this.style.transform='none'; this.style.filter='none';">Save Changes</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal for User Stats 3D Card -->
+<div id="userStatsModal" style="display:none; position:fixed; z-index:200; left:0; top:0; width:100%; height:100%; overflow:hidden; background-color:#000000; align-items:center; justify-content:center;">
+  <canvas id="statsCardSpaceCanvas" style="position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:0;"></canvas>
+  <div style="perspective: 2000px; width: 420px; z-index:1;">
+    <div id="userStatsCard" class="user-stats-3d-card">
+      <div id="statsCardGlow"></div>
+      
+      <!-- Close Button (38px x 38px circular with hover background) -->
+      <button onclick="closeUserStatsModal()" style="position:absolute; right:20px; top:20px; width:38px; height:38px; border-radius:50%; border:1px solid rgba(255, 255, 255, 0.1); background:rgba(255, 255, 255, 0.03); color:#8f9cae; font-size:20px; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:all 0.2s; z-index:10;" onmouseover="this.style.background='rgba(255,255,255,0.1)'; this.style.color='#fff'; this.style.borderColor='rgba(255,255,255,0.25)';" onmouseout="this.style.background='rgba(255,255,255,0.03)'; this.style.color='#8f9cae'; this.style.borderColor='rgba(255, 255, 255, 0.1)';">
+        &times;
+      </button>
+
+      <!-- Card Title -->
+      <div style="font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:2px; color:#7c4dff; margin-bottom:6px; text-shadow:0 1px 3px rgba(0,0,0,0.5);">User Metrics</div>
+      <div id="statsCardUsername" style="font-family:'JetBrains Mono',monospace; font-size:24px; font-weight:800; color:#ffffff; margin-bottom:28px; text-shadow:0 1px 3px rgba(0,0,0,0.5);">—</div>
+      
+      <!-- Metrics Boxes -->
+      <div style="display:flex; flex-direction:column; gap:20px; z-index:2; position:relative;">
+        <!-- Allocated Capital -->
+        <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.05); border-radius:14px; padding:16px 20px; box-shadow:0 4px 15px rgba(0,0,0,0.3);">
+          <div style="font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:#8f9cae; margin-bottom:6px; text-shadow:0 1px 3px rgba(0,0,0,0.5);">Allocated Capital</div>
+          <div id="statsCardCapital" style="font-family:'JetBrains Mono',monospace; font-size:20px; font-weight:700; color:#ebd9fc; text-shadow:0 1px 3px rgba(0,0,0,0.5);">₹0</div>
+        </div>
+
+        <!-- Realized P&L -->
+        <div id="statsCardPnlBox" style="border:1px solid rgba(255,255,255,0.05); border-radius:14px; padding:16px 20px; transition:all 0.3s; box-shadow:0 4px 15px rgba(0,0,0,0.3);">
+          <div id="statsCardPnlLabel" style="font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:#8f9cae; margin-bottom:6px; text-shadow:0 1px 3px rgba(0,0,0,0.5);">Realized P&L</div>
+          <div id="statsCardPnl" style="font-family:'JetBrains Mono',monospace; font-size:20px; font-weight:700; text-shadow:0 1px 3px rgba(0,0,0,0.5);">₹0</div>
+        </div>
+
+        <!-- Current Net Balance -->
+        <div style="background:linear-gradient(135deg, rgba(0,240,255,0.03), rgba(124,77,255,0.03)); border:1px solid rgba(0,240,255,0.15); border-radius:14px; padding:16px 20px; box-shadow:0 4px 15px rgba(0,0,0,0.3);">
+          <div style="font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:#00f0ff; margin-bottom:6px; text-shadow:0 1px 3px rgba(0,0,0,0.5);">Current Net Balance</div>
+          <div id="statsCardBalance" style="font-family:'JetBrains Mono',monospace; font-size:22px; font-weight:800; color:#00f0ff; text-shadow:0 1px 3px rgba(0,0,0,0.5);">₹0</div>
+        </div>
       </div>
     </div>
   </div>
