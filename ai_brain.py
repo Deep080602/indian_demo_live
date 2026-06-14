@@ -28,13 +28,6 @@ except ImportError:
     nn = None
     optim = None
 
-if nn is not None:
-    nn_Module = nn.Module
-else:
-    class DummyModule:
-        pass
-    nn_Module = DummyModule
-
 from db_helper import DB_PATH, get_db_connection
 
 log = logging.getLogger("ai_brain")
@@ -46,7 +39,8 @@ class SignalType(Enum):
 
 # PyTorch Deep Neural Network Architecture
 if torch is not None and nn is not None:
-    class DeepTradingModel(nn_Module):
+    class DeepTradingModel(nn.Module):  # type: ignore
+
 
         def __init__(self, input_dim: int = 4, hidden_dims: list = [64, 32, 16], output_dim: int = 3, dropout_rate: float = 0.1):
             super().__init__()
@@ -242,7 +236,7 @@ class AITradingBrain:
             features_scaled = self.scaler.transform(features)
 
             # Inference using PyTorch if applicable
-            if torch is not None and isinstance(self.model, nn_Module):
+            if torch is not None and nn is not None and isinstance(self.model, nn.Module):  # type: ignore
                 self.model.eval()
                 with torch.no_grad():
                     features_tensor = torch.tensor(features_scaled, dtype=torch.float32)
