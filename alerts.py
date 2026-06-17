@@ -107,7 +107,7 @@ def send_whatsapp(message: str):
         except Exception as e:
             print(f"[ALERT ERROR] Failed to send WhatsApp message via Green-API: {e}")
 
-def send_ntfy(message: str, title: str = None, priority: int = 3, tags: str = None):
+def send_ntfy(message: str, title: str = None, priority: int = 3, tags: str = None, username: str = None):
     """Send a mobile push alert via ntfy.sh (Zero API key / Free push gateway)."""
     try:
         from config import cfg
@@ -121,6 +121,11 @@ def send_ntfy(message: str, title: str = None, priority: int = 3, tags: str = No
     if not topic:
         print("[ALERT ERROR] ntfy.sh topic is missing in config.py")
         return
+
+    if username:
+        import re
+        clean_user = re.sub(r'[^a-zA-Z0-9]', '', username).lower()
+        topic = f"{topic}_{clean_user}"
 
     try:
         url = f"https://ntfy.sh/{topic}"
@@ -240,7 +245,7 @@ def sound_alert(alert_type: str = "info"):
     except Exception:
         pass
 
-def alert_entry(direction: str, strike: float, entry: float, sl: float, tp: float, index: str = "NIFTY", lots: int = 5, contracts: int = 325, guard_status: str = "Disabled", predicted_win_prob: float = 100.0, ai_rationale: str = ""):
+def alert_entry(direction: str, strike: float, entry: float, sl: float, tp: float, index: str = "NIFTY", lots: int = 5, contracts: int = 325, guard_status: str = "Disabled", predicted_win_prob: float = 100.0, ai_rationale: str = "", username: str = None):
     """Alert on trade entry."""
     opt = "CALL" if direction == "CALL" else "PUT"
     display_index = "NIFTY_ALGO_SHARK" if index == "NIFTY" else index
@@ -274,7 +279,7 @@ def alert_entry(direction: str, strike: float, entry: float, sl: float, tp: floa
 
     send_whatsapp(wa_msg)
     send_telegram(wa_msg)
-    send_ntfy(wa_msg, title=title, priority=4, tags="chart_with_upwards_trend,bell")
+    send_ntfy(wa_msg, title=title, priority=4, tags="chart_with_upwards_trend,bell", username=username)
     print(f"\n{'='*60}")
     print(f"  [ENTRY] TRADE ENTRY ALERT")
     print(f"  Time: {_now_str()}")
@@ -287,7 +292,7 @@ def alert_entry(direction: str, strike: float, entry: float, sl: float, tp: floa
     print(f"{'='*60}\n")
 
 def alert_win(tid: str, pnl: float, pnl_pct: float, exit_price: float, lots: int = 5, contracts: int = 325,
-              index: str = None, direction: str = None, strike: float = None, opt: str = None, entry: float = None):
+              index: str = None, direction: str = None, strike: float = None, opt: str = None, entry: float = None, username: str = None):
     """Alert on winning trade."""
     title = f"[WIN] +Rs.{pnl:,.0f} | {lots} Lots Exited"
     message = f"P&L: +Rs.{pnl:,.0f} ({pnl_pct:+.1f}%)\nLots Exited: {lots}"
@@ -316,7 +321,7 @@ def alert_win(tid: str, pnl: float, pnl_pct: float, exit_price: float, lots: int
     )
     send_whatsapp(wa_msg)
     send_telegram(wa_msg)
-    send_ntfy(wa_msg, title=title, priority=4, tags="heavy_check_mark,moneybag")
+    send_ntfy(wa_msg, title=title, priority=4, tags="heavy_check_mark,moneybag", username=username)
     print(f"\n{'='*60}")
     print(f"  [WIN] WINNING TRADE")
     print(f"  Time: {_now_str()}")
@@ -327,7 +332,7 @@ def alert_win(tid: str, pnl: float, pnl_pct: float, exit_price: float, lots: int
     print(f"{'='*60}\n")
 
 def alert_loss(tid: str, pnl: float, pnl_pct: float, exit_price: float, reason: str, lots: int = 5, contracts: int = 325,
-               index: str = None, direction: str = None, strike: float = None, opt: str = None, entry: float = None):
+               index: str = None, direction: str = None, strike: float = None, opt: str = None, entry: float = None, username: str = None):
     """Alert on losing trade."""
     title = f"[LOSS] -Rs.{abs(pnl):,.0f} | {lots} Lots Exited"
     message = f"P&L: -Rs.{abs(pnl):,.0f} ({pnl_pct:.1f}%)\nLots Exited: {lots}"
@@ -357,7 +362,7 @@ def alert_loss(tid: str, pnl: float, pnl_pct: float, exit_price: float, reason: 
     )
     send_whatsapp(wa_msg)
     send_telegram(wa_msg)
-    send_ntfy(wa_msg, title=title, priority=4, tags="x,warning")
+    send_ntfy(wa_msg, title=title, priority=4, tags="x,warning", username=username)
     print(f"\n{'='*60}")
     print(f"  [LOSS] LOSING TRADE")
     print(f"  Time: {_now_str()}")

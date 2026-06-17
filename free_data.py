@@ -24,7 +24,7 @@ TICKER_MAP = {
 }
 
 STRIKE_GAP = {"NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "SENSEX": 100}
-LOT_SIZE   = {"NIFTY": 65, "BANKNIFTY": 30,  "FINNIFTY": 120, "SENSEX": 20}
+LOT_SIZE   = {"NIFTY": 65, "BANKNIFTY": 30,  "FINNIFTY": 60, "SENSEX": 20}
 
 def _now_ist():
     return datetime.now(IST)

@@ -197,15 +197,40 @@ def register_user(username, password, is_admin=0) -> bool:
         return False
 
 def verify_user(username, password) -> int:
-    """Verify login and return user_id. Returns -1 if invalid."""
+    """Verify login and return user_id. Returns -1 if invalid. Supports case-insensitive and lenient fallback."""
     try:
+        username_clean = username.strip()
+        if not username_clean:
+            return -1
+        pwd_hash = _hash_password(password)
         with get_db_connection() as conn:
             c = conn.cursor()
-            pwd_hash = _hash_password(password)
-            c.execute("SELECT id FROM users WHERE username = ? AND password_hash = ?", (username.strip(), pwd_hash))
+            
+            # 1. Try exact match
+            c.execute("SELECT id FROM users WHERE username = ? AND password_hash = ?", (username_clean, pwd_hash))
             row = c.fetchone()
-            if row:
-                user_id = row[0]
+            user_id = row[0] if row else -1
+            
+            # 2. Try case-insensitive match
+            if user_id == -1:
+                c.execute("SELECT id FROM users WHERE LOWER(username) = LOWER(?) AND password_hash = ?", (username_clean, pwd_hash))
+                row = c.fetchone()
+                if row:
+                    user_id = row[0]
+                    
+            # 3. Try lenient match (remove spaces, dots, hyphens, underscores)
+            if user_id == -1:
+                import re
+                def normalize(s):
+                    return re.sub(r'[^a-zA-Z0-9]', '', s).lower()
+                norm_input = normalize(username_clean)
+                c.execute("SELECT id, username, password_hash FROM users")
+                for r in c.fetchall():
+                    if normalize(r[1]) == norm_input and r[2] == pwd_hash:
+                        user_id = r[0]
+                        break
+                        
+            if user_id != -1:
                 # Update last login
                 c.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (datetime.now().isoformat(), user_id))
                 conn.commit()
@@ -427,14 +452,35 @@ def delete_user_trade_history(user_id) -> bool:
         return False
 
 def get_user_id_by_username(username: str) -> int:
-    """Resolve user_id from username. Returns -1 if not found."""
+    """Resolve user_id from username. Returns -1 if not found. Supports case-insensitive and lenient fallback."""
     try:
+        username_clean = username.strip()
+        if not username_clean:
+            return -1
         with get_db_connection() as conn:
             c = conn.cursor()
-            c.execute("SELECT id FROM users WHERE username = ?", (username.strip(),))
+            
+            # 1. Try exact match
+            c.execute("SELECT id FROM users WHERE username = ?", (username_clean,))
             row = c.fetchone()
             if row:
                 return row[0]
+                
+            # 2. Try case-insensitive match
+            c.execute("SELECT id FROM users WHERE LOWER(username) = LOWER(?)", (username_clean,))
+            row = c.fetchone()
+            if row:
+                return row[0]
+                
+            # 3. Try lenient match (remove spaces, dots, hyphens, underscores)
+            import re
+            def normalize(s):
+                return re.sub(r'[^a-zA-Z0-9]', '', s).lower()
+            norm_input = normalize(username_clean)
+            c.execute("SELECT id, username FROM users")
+            for r in c.fetchall():
+                if normalize(r[1]) == norm_input:
+                    return r[0]
     except Exception as e:
         log.error(f"[DB] Error getting user_id for {username}: {e}")
     return -1

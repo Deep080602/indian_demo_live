@@ -338,8 +338,22 @@ from functools import wraps
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # Prioritize query parameter or header for mobile/API clients to override stale or different browser sessions
+        username = request.args.get("username") or request.headers.get("X-Username")
+        if username:
+            uid = db_helper.get_user_id_by_username(username.strip())
+            if uid != -1:
+                session["user_id"] = uid
+                return f(*args, **kwargs)
+            else:
+                log.warning(f"[AUTH] Mobile fallback auth failed: user '{username}' not found in database.")
+                return jsonify({"status": "error", "message": f"User '{username}' not found"}), 401
+        
+        # Standard session cookie check for web dashboard
         if "user_id" in session:
             return f(*args, **kwargs)
+            
+        log.warning("[AUTH] Auth failed: no user_id in session and no username/X-Username query or header parameter provided.")
         return jsonify({"status": "error", "message": "Authentication required"}), 401
     return decorated_function
 
@@ -490,7 +504,7 @@ def api_data():
                 open_positions.append({
                     "tid": p.tid,
                     "index": p.index,
-                    "direction": p.direction,
+                    "direction": "BUY" if p.direction in ("CALL", "PUT") else p.direction,
                     "strike": p.strike,
                     "opt": p.opt,
                     "expiry": p.expiry,
@@ -573,12 +587,17 @@ def api_data():
 
     cum = 0
     equity = []
+    serialized_trades = []
     for t in trades:
         cum += t["pnl"]
         equity.append(round(cum, 2))
+        t_copy = dict(t)
+        if t_copy.get("direction") in ("CALL", "PUT"):
+            t_copy["direction"] = "BUY"
+        serialized_trades.append(t_copy)
 
     response_data = {
-        "trades": trades,
+        "trades": serialized_trades,
         "open_positions": open_positions,
         "equity": equity,
         "log": lines[-30:],
@@ -1029,6 +1048,16 @@ def api_trades_download():
         headers={"Content-disposition": f"attachment; filename={filename}"}
     )
 
+@_dashboard_app.route("/download/apk", methods=["GET"])
+def download_apk():
+    from flask import send_file
+    import os
+    apk_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app-debug.apk")
+    if os.path.exists(apk_path):
+        return send_file(apk_path, as_attachment=True, download_name="AlgoPulse.apk")
+    else:
+        return jsonify({"status": "error", "message": "APK file not found"}), 404
+
 @_dashboard_app.route("/api/indices/update", methods=["POST"])
 @login_required
 def api_indices_update():
@@ -1329,7 +1358,8 @@ def api_place_manual_trade():
         alert_entry(
             "BUY", strike, entry, sl, tp, 
             index=index, lots=lots, contracts=contracts,
-            guard_status="Manual", predicted_win_prob=100.0
+            guard_status="Manual", predicted_win_prob=100.0,
+            username=book.username
         )
         
         return jsonify({
@@ -2286,8 +2316,8 @@ def calculate_charges_breakdown(price: float, quantity: int, is_buy: bool, index
     """
     Calculate exact F&O option contract charges breakdown for NSE/BSE Options in India:
     - Brokerage: flat Rs. 20 per transaction
-    - STT: 0.1% of premium value (sell-side only, raised in 2024 budget)
-    - Exchange Transaction Charge: 0.0495% (NSE) or 0.0325% (BSE) of premium value
+    - STT: 0.15% of premium value (sell-side only, raised in 2024 budget, rounded to nearest rupee)
+    - Exchange Transaction Charge: 0.03503% (NSE) or 0.0325% (BSE) of premium value
     - SEBI Turnover Fee: 0.0001% (Rs. 10/crore) of premium value
     - GST: 18% of (Brokerage + Exchange Transaction Charges + SEBI Fee)
     - Stamp Duty: 0.003% of premium value (buy-side only)
@@ -2308,12 +2338,16 @@ def calculate_charges_breakdown(price: float, quantity: int, is_buy: bool, index
     # 1. Brokerage
     brokerage = 20.0
     
-    # 2. STT (0.1% on sell side premium only)
-    stt = round(0.001 * premium_value, 2) if not is_buy else 0.0
+    # 2. STT (0.15% on sell side premium only, rounded to nearest rupee)
+    if not is_buy:
+        import math
+        stt = float(math.floor(0.0015 * premium_value + 0.5))
+    else:
+        stt = 0.0
     
     # 3. Exchange Transaction Charges (NSE vs BSE)
     is_bse = any(x in index.upper() for x in ["SENSEX", "BANKEX", "BSE"])
-    txn_rate = 0.000325 if is_bse else 0.000495
+    txn_rate = 0.000325 if is_bse else 0.0003503
     exchange_charges = round(txn_rate * premium_value, 2)
     
     # 4. SEBI Turnover Fee (0.0001% of premium)
@@ -2872,7 +2906,8 @@ class Book:
             p.direction, p.strike, p.entry, p.sl, p.tp, 
             index=p.index, lots=p.lots, contracts=p.contracts,
             guard_status=p.guard_status, predicted_win_prob=p.predicted_win_prob,
-            ai_rationale=sig.get('ai_rationale', '')
+            ai_rationale=sig.get('ai_rationale', ''),
+            username=self.username
         )
         return p
 
@@ -3070,10 +3105,10 @@ class Book:
         # Alerts
         if p.pnl > 0:
             alert_win(p.tid, p.pnl, p.pnl_pct, p.exit_px, lots=p.lots, contracts=p.contracts,
-                      index=p.index, direction=p.direction, strike=p.strike, opt=p.opt, entry=p.entry)
+                      index=p.index, direction=p.direction, strike=p.strike, opt=p.opt, entry=p.entry, username=self.username)
         else:
             alert_loss(p.tid, p.pnl, p.pnl_pct, p.exit_px, reason, lots=p.lots, contracts=p.contracts,
-                       index=p.index, direction=p.direction, strike=p.strike, opt=p.opt, entry=p.entry)
+                       index=p.index, direction=p.direction, strike=p.strike, opt=p.opt, entry=p.entry, username=self.username)
 
         return p
 
@@ -4877,7 +4912,7 @@ input:checked + .slider:before {
 
 
 <!-- Active Open Positions -->
-<div class="card open-pos-card" id="openPosCard" style="margin-bottom:20px;display:none;">
+<div class="card open-pos-card" id="openPosCard" style="margin-bottom:20px;">
   <div class="card-title" style="display:flex;justify-content:space-between;align-items:center;">
     <span>⚡ ACTIVE POSITIONS</span>
     <span class="pulse-badge" id="activeCount">0 ACTIVE</span>
@@ -4907,7 +4942,7 @@ input:checked + .slider:before {
 
 <div class="charts"><div class="card eq-wrap"><div class="card-title" style="display:flex;justify-content:space-between;align-items:center;"><span>📊 PERFORMANCE TRAJECTORY</span><div class="chart-tabs"><button id="btnEquityWeb" class="chart-tab active" onclick="switchWebChart('equity')">📈 Equity Curve</button><button id="btnDrawdownWeb" class="chart-tab" onclick="switchWebChart('drawdown')">📉 Drawdown</button></div></div><div class="chart-box" style="position:relative;" id="equityWebChartContainer"><canvas id="eq"></canvas><canvas id="eqSpark"></canvas><div class="eq-glow"></div></div><div class="chart-box" style="position:relative;display:none;" id="drawdownWebChartContainer"><canvas id="ddChart"></canvas></div></div><div class="card"><div class="card-title">Win/Loss Per Trade</div><div class="chart-box" style="position:relative;"><canvas id="wl"></canvas></div></div></div>
 
-<div class="bottom"><div class="card"><div class="card-title">Trade History</div><div class="table-scroll"><table><thead><tr><th>Index</th><th>Date</th><th>Entry Time</th><th>Exit Time</th><th>Dir</th><th>Strike</th><th>Entry</th><th>Exit</th><th>Charges</th><th>PnL (Net)</th><th>Reason</th></tr></thead><tbody id="tTbl"><tr><td colspan="11" class="empty">No trades yet</td></tr></tbody></table></div></div></div>
+<div class="bottom"><div class="card"><div class="card-title" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;"><span>Trade History</span><div style="display:flex; align-items:center; gap:8px;"><label for="tradeDateFilter" style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--muted); font-weight:700;">Filter by Date:</label><input type="date" id="tradeDateFilter" style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:6px; padding:6px 10px; color:#fff; font-size:12px; outline:none; font-family:'Inter',sans-serif; transition:border-color 0.2s;" onchange="renderTradesTable()" onfocus="this.style.borderColor='rgba(0,240,255,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.08)'"><button onclick="clearDateFilter()" style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); border-radius:6px; padding:6px 12px; color:var(--muted); font-size:11px; font-weight:700; cursor:pointer; transition:all 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.1)'; this.style.color='#fff';" onmouseout="this.style.background='rgba(255,255,255,0.05)'; this.style.color='var(--muted)';">Clear</button></div></div><div class="table-scroll"><table><thead><tr><th>Index</th><th>Date</th><th>Entry Time</th><th>Exit Time</th><th>Dir</th><th>Strike</th><th>Entry</th><th>Exit</th><th>Charges</th><th>PnL (Net)</th><th>Reason</th></tr></thead><tbody id="tTbl"><tr><td colspan="11" class="empty">No trades yet</td></tr></tbody></table></div></div></div>
 
 <div class="index-break" id="indexBreakContainer">
   <!-- Dynamic index cards will be generated here -->
@@ -5665,8 +5700,11 @@ function getOpenPositionRowHtml(p) {
   const idxColor = idxColors[p.index] || '#ff00e4';
   const idx = `<span style="color:${idxColor};font-weight:700">${p.index}</span>`;
   const chgVal = p.charges ? 'Rs.' + fi(p.charges) : '—';
-  const maxLoss = Math.round((p.entry - p.sl) * p.contracts);
+  const maxLossVal = Math.round((p.entry - p.sl) * p.contracts);
   const maxProfit = Math.round((p.tp - p.entry) * p.contracts);
+  const lossSign = maxLossVal < 0 ? '+' : '-';
+  const lossClass = maxLossVal < 0 ? 'g' : 'r';
+  const maxLossDisp = Math.abs(maxLossVal);
   const dirClass = (p.opt || p.direction || '').toUpperCase() === 'CE' ? 'call' : 'put';
   const contractLabel = p.contract_sym || `${p.index} ${p.strike}${p.opt}`;
   const expiryLabel = p.expiry || '—';
@@ -5695,7 +5733,7 @@ function getOpenPositionRowHtml(p) {
       </div>
     </td>
     <td class="pos-targets m" style="line-height:1.45; text-align:center;">
-      <div style="font-weight:700;"><span class="r">-₹${fi(maxLoss)}</span></div>
+      <div style="font-weight:700;"><span class="${lossClass}">${lossSign}₹${fi(maxLossDisp)}</span></div>
       <div style="font-weight:700;"><span class="g">+₹${fi(maxProfit)}</span></div>
     </td>
     <td class="m" style="cursor:pointer;text-decoration:underline;color:var(--blue);" onclick="showChargesDetails('${p.tid} Position', ${p.brokerage}, ${p.gst}, ${p.stt}, ${p.stamp_duty}, ${p.exchange_charges}, ${p.sebi_fee}, ${p.charges})">${chgVal}</td>
@@ -5947,8 +5985,9 @@ async function load(){
     const ot = document.getElementById('openTbl');
     const ac = document.getElementById('activeCount');
     if (!d.open_positions || !d.open_positions.length) {
-      opc.style.display = 'none';
-      ot.innerHTML = '';
+      opc.style.display = 'block';
+      ac.textContent = '0 ACTIVE';
+      ot.innerHTML = '<tr><td colspan="12" class="empty">No active positions</td></tr>';
     } else {
       opc.style.display = 'block';
       ac.textContent = d.open_positions.length + ' ACTIVE';
@@ -5977,12 +6016,15 @@ async function load(){
               pnlCell.className = `pos-pnl ${w ? 'g' : 'r'}`;
             }
             
-            const maxLoss = Math.round((p.entry - p.sl) * p.contracts);
+            const maxLossVal = Math.round((p.entry - p.sl) * p.contracts);
             const maxProfit = Math.round((p.tp - p.entry) * p.contracts);
+            const lossSign = maxLossVal < 0 ? '+' : '-';
+            const lossClass = maxLossVal < 0 ? 'g' : 'r';
+            const maxLossDisp = Math.abs(maxLossVal);
             const targetsCell = tr.querySelector('.pos-targets');
             if (targetsCell) {
               targetsCell.innerHTML = `
-                <div style="font-weight:700;"><span class="r">-₹${fi(maxLoss)}</span></div>
+                <div style="font-weight:700;"><span class="${lossClass}">${lossSign}₹${fi(maxLossDisp)}</span></div>
                 <div style="font-weight:700;"><span class="g">+₹${fi(maxProfit)}</span></div>
               `;
             }
@@ -6008,97 +6050,7 @@ async function load(){
       }
     }
     
-    const formatTime = ts => {
-      if (!ts) return '—';
-      const m = String(ts).match(/\d{2}:\d{2}:\d{2}/);
-      return m ? m[0] : ts;
-    };
-    const tb=document.getElementById('tTbl');
-    const tradeRow = t => {
-      const w=+t.pnl>0;
-      let idx = t.index_name || 'NIFTY';
-      const idxColors = {
-        'NIFTY': 'var(--blue)',
-        'SENSEX': 'var(--gold)',
-        'BANKNIFTY': '#ff4757',
-        'FINNIFTY': '#2ed573',
-        'MIDCPNIFTY': '#1e90ff',
-        'BANKEX': '#ffa502'
-      };
-      const color = idxColors[idx] || '#ff00e4';
-      const idxBadge=`<span style="color:${color};font-size:9px;font-weight:700">${idx}</span>`;
-      const chg = t.charges ? 'Rs.' + fi(t.charges) : '—';
-      return `<tr><td>${idxBadge}</td><td class="m">${t.date||''}</td><td class="m">${formatTime(t.entry_time)}</td><td class="m">${formatTime(t.exit_time)}</td><td><span class="badge ${(t.direction||'').toLowerCase()}">${t.direction||''}</span></td><td>${t.strike||''}${t.opt||''}<div style="font-size:9px;color:rgba(255,255,255,0.45);font-family:monospace;margin-top:2px;">Exp: ${t.expiry||'—'}</div></td><td>Rs.${t.entry||0}</td><td>${t.exit?'Rs.'+t.exit:'—'}</td><td class="m" style="cursor:pointer;text-decoration:underline;color:var(--blue);" onclick="showChargesDetails('${t.tid} Realized', ${t.brokerage||0}, ${t.gst||0}, ${t.stt||0}, ${t.stamp_duty||0}, ${t.exchange_charges||0}, ${t.sebi_fee||0}, ${t.charges||0})">${chg}</td><td class="${w?'g':'r'}">${fp(t.pnl)}</td><td class="m">${escapeHtml((t.reason||'').replace(/_/g,' '))}</td></tr>`;
-    };
-    if(!d.trades||!d.trades.length){
-      tb.innerHTML='<tr><td colspan="11" class="empty">No trades yet</td></tr>';
-    } else {
-      tb.innerHTML=[...d.trades].reverse().map(tradeRow).join('');
-    }
-    // Index breakdown tables
-    const indexRow = t => {
-      const w=+t.pnl>0;
-      const chg = t.charges ? 'Rs.' + fi(t.charges) : '—';
-      return `<tr><td class="m">${formatTime(t.entry_time)}</td><td class="m">${formatTime(t.exit_time)}</td><td><span class="badge ${(t.direction||'').toLowerCase()}">${t.direction||''}</span></td><td>${t.strike||''}${t.opt||''}<div style="font-size:9px;color:rgba(255,255,255,0.45);font-family:monospace;margin-top:2px;">Exp: ${t.expiry||'—'}</div></td><td>Rs.${t.entry||0}</td><td>${t.exit?'Rs.'+t.exit:'—'}</td><td class="m" style="cursor:pointer;text-decoration:underline;color:var(--blue);" onclick="showChargesDetails('${t.tid} Realized', ${t.brokerage||0}, ${t.gst||0}, ${t.stt||0}, ${t.stamp_duty||0}, ${t.exchange_charges||0}, ${t.sebi_fee||0}, ${t.charges||0})">${chg}</td><td class="${w?'g':'r'}">${fp(t.pnl)}</td><td class="m">${escapeHtml((t.reason||'').replace(/_/g,' '))}</td></tr>`;
-    };
-    const allTrades=d.trades||[];
-    
-    // Dynamically render index cards
-    const container = document.getElementById('indexBreakContainer');
-    if (container && d.trading_indices) {
-      if (container.children.length !== d.trading_indices.length) {
-        container.innerHTML = d.trading_indices.map(idx => {
-          const displayName = idx === 'NIFTY' ? 'nifty trade' : idx === 'SENSEX' ? 'sensex trade' : idx + ' Trades';
-          const className = idx.toLowerCase() + '-card';
-          const titleClass = idx.toLowerCase();
-          return `
-            <div class="card ${className}">
-              <div class="idx-hdr">
-                <span class="idx-title ${titleClass}">⬡ ${displayName}</span>
-                <span class="idx-pnl" id="${idx.toLowerCase()}Pnl">—</span>
-              </div>
-              <div class="index-table-scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Entry Time</th>
-                      <th>Exit Time</th>
-                      <th>Dir</th>
-                      <th>Strike</th>
-                      <th>Entry</th>
-                      <th>Exit</th>
-                      <th>Charges</th>
-                      <th>PnL (Net)</th>
-                      <th>Reason</th>
-                    </tr>
-                  </thead>
-                  <tbody id="${idx.toLowerCase()}Tbl">
-                    <tr><td colspan="9" class="empty">No trades yet</td></tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>`;
-        }).join('');
-      }
-    }
-    
-    if (d.trading_indices) {
-      d.trading_indices.forEach(idx => {
-        const idxTrades = allTrades.filter(t => (t.index_name || '').toUpperCase() === idx.toUpperCase());
-        const idxPnl = idxTrades.reduce((s, t) => s + (+t.pnl || 0), 0);
-        const pnlEl = document.getElementById(`${idx.toLowerCase()}Pnl`);
-        if (pnlEl) {
-          pnlEl.textContent = fp(idxPnl);
-          pnlEl.className = 'idx-pnl ' + (idxPnl >= 0 ? 'g' : 'r');
-        }
-        const tblEl = document.getElementById(`${idx.toLowerCase()}Tbl`);
-        if (tblEl) {
-          tblEl.innerHTML = idxTrades.length 
-            ? [...idxTrades].reverse().slice(0, 15).map(indexRow).join('') 
-            : '<tr><td colspan="9" class="empty">No trades yet</td></tr>';
-        }
-      });
-    }
+    renderTradesTable();
     const labels=(d.equity||[]).map((_,i)=>'#'+(i+1));
     const eqData=d.equity||[];
     const pnls=(d.trades||[]).map(t=>+t.pnl);
@@ -6316,6 +6268,122 @@ async function load(){
   } catch(e){ document.getElementById('rb').textContent = 'Error'; }
 }
 let lastStats = null;
+
+function renderTradesTable() {
+  const d = window.lastLoadedData;
+  if (!d) return;
+
+  const dateFilterInput = document.getElementById('tradeDateFilter');
+  const selectedDate = dateFilterInput ? dateFilterInput.value : '';
+
+  const formatTime = ts => {
+    if (!ts) return '—';
+    const m = String(ts).match(/\d{2}:\d{2}:\d{2}/);
+    return m ? m[0] : ts;
+  };
+  const tb = document.getElementById('tTbl');
+  const tradeRow = t => {
+    const w = +t.pnl > 0;
+    let idx = t.index_name || 'NIFTY';
+    const idxColors = {
+      'NIFTY': 'var(--blue)',
+      'SENSEX': 'var(--gold)',
+      'BANKNIFTY': '#ff4757',
+      'FINNIFTY': '#2ed573',
+      'MIDCPNIFTY': '#1e90ff',
+      'BANKEX': '#ffa502'
+    };
+    const color = idxColors[idx] || '#ff00e4';
+    const idxBadge = `<span style="color:${color};font-size:9px;font-weight:700">${idx}</span>`;
+    const chg = t.charges ? 'Rs.' + fi(t.charges) : '—';
+    return `<tr><td>${idxBadge}</td><td class="m">${t.date||''}</td><td class="m">${formatTime(t.entry_time)}</td><td class="m">${formatTime(t.exit_time)}</td><td><span class="badge ${(t.direction||'').toLowerCase()}">${t.direction||''}</span></td><td>${t.strike||''}${t.opt||''}<div style="font-size:9px;color:rgba(255,255,255,0.45);font-family:monospace;margin-top:2px;">Exp: ${t.expiry||'—'}</div></td><td>Rs.${t.entry||0}</td><td>${t.exit?'Rs.'+t.exit:'—'}</td><td class="m" style="cursor:pointer;text-decoration:underline;color:var(--blue);" onclick="showChargesDetails('${t.tid} Realized', ${t.brokerage||0}, ${t.gst||0}, ${t.stt||0}, ${t.stamp_duty||0}, ${t.exchange_charges||0}, ${t.sebi_fee||0}, ${t.charges||0})">${chg}</td><td class="${w?'g':'r'}">${fp(t.pnl)}</td><td class="m">${escapeHtml((t.reason||'').replace(/_/g,' '))}</td></tr>`;
+  };
+
+  let displayTrades = d.trades || [];
+  if (selectedDate) {
+    displayTrades = displayTrades.filter(t => t.date === selectedDate);
+  }
+
+  if (!displayTrades.length) {
+    tb.innerHTML = '<tr><td colspan="11" class="empty">No trades yet</td></tr>';
+  } else {
+    tb.innerHTML = [...displayTrades].reverse().map(tradeRow).join('');
+  }
+
+  // Index breakdown tables
+  const indexRow = t => {
+    const w = +t.pnl > 0;
+    const chg = t.charges ? 'Rs.' + fi(t.charges) : '—';
+    return `<tr><td class="m">${formatTime(t.entry_time)}</td><td class="m">${formatTime(t.exit_time)}</td><td><span class="badge ${(t.direction||'').toLowerCase()}">${t.direction||''}</span></td><td>${t.strike||''}${t.opt||''}<div style="font-size:9px;color:rgba(255,255,255,0.45);font-family:monospace;margin-top:2px;">Exp: ${t.expiry||'—'}</div></td><td>Rs.${t.entry||0}</td><td>${t.exit?'Rs.'+t.exit:'—'}</td><td class="m" style="cursor:pointer;text-decoration:underline;color:var(--blue);" onclick="showChargesDetails('${t.tid} Realized', ${t.brokerage||0}, ${t.gst||0}, ${t.stt||0}, ${t.stamp_duty||0}, ${t.exchange_charges||0}, ${t.sebi_fee||0}, ${t.charges||0})">${chg}</td><td class="${w?'g':'r'}">${fp(t.pnl)}</td><td class="m">${escapeHtml((t.reason||'').replace(/_/g,' '))}</td></tr>`;
+  };
+
+  const allTrades = selectedDate ? (d.trades || []).filter(t => t.date === selectedDate) : (d.trades || []);
+
+  // Dynamically render index cards
+  const container = document.getElementById('indexBreakContainer');
+  if (container && d.trading_indices) {
+    if (container.children.length !== d.trading_indices.length) {
+      container.innerHTML = d.trading_indices.map(idx => {
+        const displayName = idx === 'NIFTY' ? 'nifty trade' : idx === 'SENSEX' ? 'sensex trade' : idx + ' Trades';
+        const className = idx.toLowerCase() + '-card';
+        const titleClass = idx.toLowerCase();
+        return `
+          <div class="card ${className}">
+            <div class="idx-hdr">
+              <span class="idx-title ${titleClass}">⬡ ${displayName}</span>
+              <span class="idx-pnl" id="${idx.toLowerCase()}Pnl">—</span>
+            </div>
+            <div class="index-table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Entry Time</th>
+                    <th>Exit Time</th>
+                    <th>Dir</th>
+                    <th>Strike</th>
+                    <th>Entry</th>
+                    <th>Exit</th>
+                    <th>Charges</th>
+                    <th>PnL (Net)</th>
+                    <th>Reason</th>
+                  </tr>
+                </thead>
+                <tbody id="${idx.toLowerCase()}Tbl">
+                  <tr><td colspan="9" class="empty">No trades yet</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>`;
+      }).join('');
+    }
+  }
+
+  if (d.trading_indices) {
+    d.trading_indices.forEach(idx => {
+      const idxTrades = allTrades.filter(t => (t.index_name || '').toUpperCase() === idx.toUpperCase());
+      const idxPnl = idxTrades.reduce((s, t) => s + (+t.pnl || 0), 0);
+      const pnlEl = document.getElementById(`${idx.toLowerCase()}Pnl`);
+      if (pnlEl) {
+        pnlEl.textContent = fp(idxPnl);
+        pnlEl.className = 'idx-pnl ' + (idxPnl >= 0 ? 'g' : 'r');
+      }
+      const tblEl = document.getElementById(`${idx.toLowerCase()}Tbl`);
+      if (tblEl) {
+        tblEl.innerHTML = idxTrades.length 
+          ? [...idxTrades].reverse().slice(0, 15).map(indexRow).join('') 
+          : '<tr><td colspan="9" class="empty">No trades yet</td></tr>';
+      }
+    });
+  }
+}
+
+function clearDateFilter() {
+  const dateFilterInput = document.getElementById('tradeDateFilter');
+  if (dateFilterInput) {
+    dateFilterInput.value = '';
+  }
+  renderTradesTable();
+}
 
 async function updateSlTp(tid) {
   const slVal = parseFloat(document.getElementById(`sl-${tid}`).value);

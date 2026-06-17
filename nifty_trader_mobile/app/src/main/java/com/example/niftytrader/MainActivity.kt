@@ -192,6 +192,7 @@ data class TradingData(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        java.net.CookieHandler.setDefault(java.net.CookieManager(null, java.net.CookiePolicy.ACCEPT_ALL))
         enableEdgeToEdge()
         setContent {
             NiftyTraderApp()
@@ -214,7 +215,16 @@ fun NiftyTraderApp() {
     }
 
     var rawBaseUrl by remember {
-        mutableStateOf(sharedPrefs.getString("raw_base_url", "https://overexert-purposely-illusion.ngrok-free.dev") ?: "https://overexert-purposely-illusion.ngrok-free.dev")
+        val saved = sharedPrefs.getString("raw_base_url", "https://gladly-crib-astound.ngrok-free.dev") ?: "https://gladly-crib-astound.ngrok-free.dev"
+        val initialUrl = if (saved.contains("overexert-purposely-illusion")) {
+            "https://gladly-crib-astound.ngrok-free.dev"
+        } else {
+            saved
+        }
+        if (saved != initialUrl) {
+            sharedPrefs.edit().putString("raw_base_url", initialUrl).apply()
+        }
+        mutableStateOf(initialUrl)
     } 
     var username by remember {
         mutableStateOf(sharedPrefs.getString("username", "") ?: "")
@@ -270,6 +280,22 @@ fun NiftyTraderApp() {
     var isSubmittingDelete by remember { mutableStateOf(false) }
 
     var showFullHistory by remember { mutableStateOf(false) }
+    var selectedDateFilter by remember { mutableStateOf("") }
+    val calendar = java.util.Calendar.getInstance()
+    val datePickerDialog = android.app.DatePickerDialog(
+        context,
+        { _, year, month, dayOfMonth ->
+            selectedDateFilter = String.format("%04d-%02d-%02d", year, month + 1, dayOfMonth)
+        },
+        calendar.get(java.util.Calendar.YEAR),
+        calendar.get(java.util.Calendar.MONTH),
+        calendar.get(java.util.Calendar.DAY_OF_MONTH)
+    )
+    val filteredTrades = if (selectedDateFilter.isEmpty()) {
+        tradingData.trades
+    } else {
+        tradingData.trades.filter { it.date == selectedDateFilter }
+    }
     var isRefreshing by remember { mutableStateOf(false) }
     val infiniteTransition = rememberInfiniteTransition(label = "refresh_spin")
     val spinAngle by infiniteTransition.animateFloat(
@@ -287,7 +313,12 @@ fun NiftyTraderApp() {
                 tradingData = data
                 connectionError = null
             } catch (e: Exception) {
-                connectionError = e.message ?: "Failed to connect to backend server"
+                val msg = e.message ?: ""
+                connectionError = msg
+                if (msg.contains("401")) {
+                    isAuthenticated = false
+                    sharedPrefs.edit().putBoolean("is_authenticated", false).apply()
+                }
             }
             delay(5000)
         }
@@ -1353,7 +1384,7 @@ fun NiftyTraderApp() {
                                 fontFamily = FontFamily.Monospace
                             )
                             Text(
-                                text = "VIEW ALL (${tradingData.trades.size}) ↗",
+                                text = "VIEW ALL (${filteredTrades.size}) ↗",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = ColorMuted,
                                 fontFamily = FontFamily.Monospace,
@@ -1361,9 +1392,51 @@ fun NiftyTraderApp() {
                             )
                         }
                         
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = { datePickerDialog.show() },
+                                modifier = Modifier.height(28.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                                shape = RoundedCornerShape(6.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = ColorCardBG),
+                                border = BorderStroke(1.dp, ColorBorder)
+                            ) {
+                                Text(
+                                    text = if (selectedDateFilter.isEmpty()) "📅 SELECT DATE" else "📅 $selectedDateFilter",
+                                    color = ColorBlue,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                            if (selectedDateFilter.isNotEmpty()) {
+                                Button(
+                                    onClick = { selectedDateFilter = "" },
+                                    modifier = Modifier.height(28.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                    shape = RoundedCornerShape(6.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = ColorRed.copy(alpha = 0.15f)),
+                                    border = BorderStroke(1.dp, ColorRed)
+                                ) {
+                                    Text(
+                                        text = "✕ CLEAR",
+                                        color = ColorRed,
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+                        }
+
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        if (tradingData.trades.isEmpty()) {
+                        if (filteredTrades.isEmpty()) {
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1371,7 +1444,7 @@ fun NiftyTraderApp() {
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = "NO TRADES RECORDED YET",
+                                    text = if (selectedDateFilter.isEmpty()) "NO TRADES RECORDED YET" else "NO TRADES ON THIS DATE",
                                     color = ColorMuted,
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontFamily = FontFamily.Monospace
@@ -1385,7 +1458,7 @@ fun NiftyTraderApp() {
                                     .height(182.dp)
                                     .verticalScroll(rememberScrollState())
                             ) {
-                                tradingData.trades.forEach { trade ->
+                                filteredTrades.forEach { trade ->
                                     TradeHistoryCard(trade = trade)
                                     Spacer(modifier = Modifier.height(8.dp))
                                 }
@@ -1945,7 +2018,7 @@ fun NiftyTraderApp() {
                                     .fillMaxWidth()
                                     .weight(1f)
                             ) {
-                                items(tradingData.trades) { trade ->
+                                items(filteredTrades) { trade ->
                                     TradeHistoryCard(trade = trade)
                                     Spacer(modifier = Modifier.height(8.dp))
                                 }
@@ -3848,10 +3921,19 @@ fun TradeHistoryCard(trade: Trade) {
 
 fun buildUrl(baseUrl: String, path: String): URL {
     val base = if (baseUrl.contains("?")) baseUrl.substringBefore("?") else baseUrl
-    val query = if (baseUrl.contains("?")) "?" + baseUrl.substringAfter("?") else ""
+    val query = if (baseUrl.contains("?")) baseUrl.substringAfter("?") else ""
     val cleanBase = base.removeSuffix("/")
     val cleanPath = if (path.startsWith("/")) path else "/$path"
-    return URL("$cleanBase$cleanPath$query")
+    
+    val finalUrl = StringBuilder("$cleanBase$cleanPath")
+    if (query.isNotEmpty()) {
+        if (cleanPath.contains("?")) {
+            finalUrl.append("&").append(query)
+        } else {
+            finalUrl.append("?").append(query)
+        }
+    }
+    return URL(finalUrl.toString())
 }
 
 suspend fun fetchDashboardData(baseUrl: String): TradingData = withContext(Dispatchers.IO) {
@@ -3904,7 +3986,9 @@ suspend fun fetchDashboardData(baseUrl: String): TradingData = withContext(Dispa
                 date = obj.optString("date", ""),
                 entryTime = obj.optString("entry_time", ""),
                 exitTime = obj.optString("exit_time", ""),
-                direction = obj.optString("direction", ""),
+                direction = obj.optString("direction", "").let { d ->
+                    if (d == "CALL" || d == "PUT") "BUY" else d
+                },
                 strike = obj.optString("strike", ""),
                 opt = obj.optString("opt", ""),
                 entry = obj.optDouble("entry", 0.0),
@@ -3924,7 +4008,9 @@ suspend fun fetchDashboardData(baseUrl: String): TradingData = withContext(Dispa
             Position(
                 tid = obj.optString("tid", ""),
                 index = obj.optString("index", ""),
-                direction = obj.optString("direction", ""),
+                direction = obj.optString("direction", "").let { d ->
+                    if (d == "CALL" || d == "PUT") "BUY" else d
+                },
                 strike = obj.optDouble("strike", 0.0),
                 opt = obj.optString("opt", ""),
                 contracts = obj.optInt("contracts", 0),

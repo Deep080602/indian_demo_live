@@ -35,21 +35,59 @@ class SmartTradeFilter:
         self.train_model()
 
     def train_model(self):
-        """Train or retrain the RandomForestClassifier on logs/trades.csv data."""
-        csv_path = f"{cfg.log_dir}/trades.csv"
-        if not os.path.exists(csv_path):
-            log.info("[Guard] No historical trades found (no trades.csv). Smart filter bypassed.")
-            self.samples_count = 0
-            self.wins_count = 0
-            self.losses_count = 0
-            self.accuracy = 0.0
-            self.trained = False
-            self.model = None
-            return
+        """Train or retrain the RandomForestClassifier on database or trades.csv data."""
+        import sqlite3
+        db_path = os.path.join(cfg.log_dir, "trader_multi.db")
+        db_exists = os.path.exists(db_path)
+        
+        df = pd.DataFrame()
+        using_db = False
+        
+        if db_exists:
+            try:
+                conn = sqlite3.connect(db_path)
+                # Query closed positions for all users to build a larger training dataset
+                query = """
+                    SELECT index_name AS 'Index', direction AS 'Direction', strike AS 'Strike', 
+                           entry AS 'EntryPrice', lots AS 'Lots', vix AS 'VIX', atr_pct AS 'ATR_Pct', 
+                           e9_15 AS 'EMA9_15m', e21_15 AS 'EMA21_15m', entry_time AS 'EntryTime', 
+                           pnl AS 'PnL_Rs' 
+                    FROM positions 
+                    WHERE is_open = 0
+                """
+                df = pd.read_sql_query(query, conn)
+                conn.close()
+                if not df.empty:
+                    using_db = True
+                    log.info(f"[Guard] Loaded {len(df)} closed trades from database.")
+            except Exception as e:
+                log.warning(f"[Guard] Failed to load trades from database: {e}. Falling back to CSV.")
+        
+        if not using_db:
+            csv_path = f"{cfg.log_dir}/trades.csv"
+            if not os.path.exists(csv_path):
+                log.info("[Guard] No historical trades found in DB or CSV. Smart filter bypassed.")
+                self.samples_count = 0
+                self.wins_count = 0
+                self.losses_count = 0
+                self.accuracy = 0.0
+                self.trained = False
+                self.model = None
+                return
+            try:
+                df = pd.read_csv(csv_path)
+                log.info(f"[Guard] Loaded {len(df)} closed trades from CSV.")
+            except Exception as e:
+                log.error(f"[Guard] Failed to read CSV: {e}")
+                self.samples_count = 0
+                self.wins_count = 0
+                self.losses_count = 0
+                self.accuracy = 0.0
+                self.trained = False
+                self.model = None
+                return
 
         try:
-            # Read CSV using pandas
-            df = pd.read_csv(csv_path)
             if df.empty or len(df) < cfg.smart_min_trades:
                 log.info(f"[Guard] Insufficient data. Found {len(df)} trades, need at least {cfg.smart_min_trades} to train. Running in learning mode.")
                 self.samples_count = len(df)
@@ -60,9 +98,10 @@ class SmartTradeFilter:
                 self.model = None
                 
                 # Extract actual win/loss counts from the few existing trades to display on dashboard
-                if not df.empty and "PnL_Rs" in df.columns:
+                pnl_col = "PnL_Rs"
+                if not df.empty and pnl_col in df.columns:
                     try:
-                        pnl_vals = df["PnL_Rs"].dropna().astype(float)
+                        pnl_vals = df[pnl_col].dropna().astype(float)
                         self.wins_count = sum(pnl_vals > 0)
                         self.losses_count = sum(pnl_vals <= 0)
                     except Exception as ex:
@@ -73,8 +112,9 @@ class SmartTradeFilter:
             # Map Index: NIFTY=0, SENSEX=1
             df["Index_Code"] = df["Index"].map({"NIFTY": 0.0, "SENSEX": 1.0}).fillna(0.0)
             
-            # Map Direction: CALL=1, PUT=0
-            df["Direction_Code"] = df["Direction"].map({"CALL": 1.0, "PUT": 0.0}).fillna(1.0)
+            # Map Direction: CALL/BUY=1, PUT/SELL=0
+            df["Dir_Upper"] = df["Direction"].astype(str).str.upper()
+            df["Direction_Code"] = df["Dir_Upper"].map({"CALL": 1.0, "BUY": 1.0, "PUT": 0.0, "SELL": 0.0}).fillna(1.0)
             
             # Strike and EntryPrice
             df["Strike_Val"] = df["Strike"].astype(float)
@@ -88,9 +128,41 @@ class SmartTradeFilter:
             df["EMA21_15m_Val"] = df.get("EMA21_15m", df.get("EMA21", pd.Series([0.0] * len(df)))).fillna(0.0).astype(float)
             df["EMA_Spread_15m_Val"] = abs(df["EMA9_15m_Val"] - df["EMA21_15m_Val"]).astype(float)
             
-            # Time components from EntryTime (format: H:M:S)
-            df["Hour"] = df["EntryTime"].apply(lambda t: int(str(t).split(":")[0]) if ":" in str(t) else 9)
-            df["Minute"] = df["EntryTime"].apply(lambda t: int(str(t).split(":")[1]) if ":" in str(t) else 15)
+            # Time components from EntryTime
+            def parse_hour(t_str):
+                try:
+                    t_str = str(t_str)
+                    if "T" in t_str: # ISO format from DB
+                        time_part = t_str.split("T")[1]
+                        return int(time_part.split(":")[0])
+                    elif " " in t_str: # Datetime string
+                        time_part = t_str.split(" ")[1]
+                        return int(time_part.split(":")[0])
+                    elif ":" in t_str: # Just time string (H:M:S) from CSV
+                        return int(t_str.split(":")[0])
+                    else:
+                        return 9
+                except:
+                    return 9
+                    
+            def parse_minute(t_str):
+                try:
+                    t_str = str(t_str)
+                    if "T" in t_str:
+                        time_part = t_str.split("T")[1]
+                        return int(time_part.split(":")[1])
+                    elif " " in t_str:
+                        time_part = t_str.split(" ")[1]
+                        return int(time_part.split(":")[1])
+                    elif ":" in t_str:
+                        return int(t_str.split(":")[1])
+                    else:
+                        return 15
+                except:
+                    return 15
+
+            df["Hour"] = df["EntryTime"].apply(parse_hour)
+            df["Minute"] = df["EntryTime"].apply(parse_minute)
 
             # Build feature matrix X
             X = pd.DataFrame({
@@ -118,11 +190,12 @@ class SmartTradeFilter:
             # Check class balance
             if len(y.unique()) < 2:
                 log.info(f"[Guard] Data is highly single-sided ({self.wins_count} W / {self.losses_count} L). Skipping training until balanced.")
+                self.trained = False
+                self.model = None
                 return
 
             # Train Random Forest
             from sklearn.ensemble import RandomForestClassifier
-            # Keep hyperparameters constrained to avoid overfitting on small datasets
             self.model = RandomForestClassifier(n_estimators=30, max_depth=4, random_state=42)
             self.model.fit(X, y)
             self.trained = True
