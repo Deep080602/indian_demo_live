@@ -7455,6 +7455,7 @@ window.addEventListener('keydown', (e) => {
     if (resetConfirmModal) resetConfirmModal.style.display = 'none';
     const sqModal = document.getElementById('squareoffSelectModal');
     if (sqModal) sqModal.style.display = 'none';
+  }
 });
 
 // AnimMasterLib mouse/touch coordinate tracking background listener
