@@ -3350,6 +3350,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </script>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+
+<!-- AtroposJS CDN Links -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/atropos@2.0.2/atropos.min.css">
+<script src="https://cdn.jsdelivr.net/npm/atropos@2.0.2/atropos.min.js"></script>
+
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
@@ -3365,6 +3370,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   --muted:#718096;
   --accent:#9d4edd;
   --pink:#ff00e4;
+  --x: 50vw;
+  --y: 50vh;
+}
+:root.light {
+  --bg:#fafafa;
+  --s:rgba(240, 240, 240, 0.65);
+  --card:rgba(255, 255, 255, 0.85);
+  --border:rgba(0, 0, 0, 0.08);
+  --text:#1e293b;
+  --muted:#64748b;
+  --accent:#7c4dff;
 }
 body{
   background:var(--bg);
@@ -3382,12 +3398,40 @@ body::before {
   left: -20%;
   width: 140%;
   height: 140%;
-  background: radial-gradient(circle at 15% 20%, rgba(157, 78, 221, 0.28) 0%, transparent 45%),
-              radial-gradient(circle at 85% 80%, rgba(0, 240, 255, 0.24) 0%, transparent 50%),
-              radial-gradient(circle at 50% 50%, rgba(255, 0, 127, 0.2) 0%, transparent 55%);
-  z-index: -1;
+  background: radial-gradient(circle at 15% 20%, rgba(157, 78, 221, 0.2) 0%, transparent 45%),
+              radial-gradient(circle at 85% 80%, rgba(0, 240, 255, 0.16) 0%, transparent 50%),
+              radial-gradient(circle at 50% 50%, rgba(255, 0, 127, 0.1) 0%, transparent 55%);
+  z-index: -2;
   pointer-events: none;
   animation: floatBg 25s ease-in-out infinite alternate;
+}
+/* Interactive Mouse Tracking Grid Background */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: 
+    conic-gradient(from 270deg at bottom 1px right 1px, rgba(157, 78, 221, 0.08) 25%, transparent 0),
+    radial-gradient(450px at var(--x) var(--y), rgba(157, 78, 221, 0.16) 0%, rgba(0, 240, 255, 0.05) 45%, transparent 70%);
+  background-repeat: repeat, no-repeat;
+  background-size: 50px 50px, auto;
+  transition: background-image 0.05s ease;
+}
+:root.light body::after {
+  background-image: 
+    conic-gradient(from 270deg at bottom 1px right 1px, rgba(0, 0, 0, 0.05) 25%, transparent 0),
+    radial-gradient(450px at var(--x) var(--y), rgba(157, 78, 221, 0.08) 0%, rgba(0, 240, 255, 0.03) 45%, transparent 70%);
+}
+.mc-atropos {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.card-atropos {
+  width: 100%;
+  margin-bottom: 20px;
 }
 @keyframes floatBg {
   0% { transform: translate(0,0) scale(1); }
@@ -3573,9 +3617,11 @@ body::before {
   overflow:hidden;
   box-shadow:0 8px 32px rgba(0,0,0,0.45);
   transition:all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  width: 100%;
+  height: 100%;
 }
 .mc:hover{
-  transform:translateY(-4px);
+  transform:none !important;
 }
 .mc.blue:hover { border-color: var(--blue); box-shadow: 0 10px 25px rgba(0, 240, 255, 0.25); }
 .mc.purple:hover { border-color: var(--pink); box-shadow: 0 10px 25px rgba(255, 0, 228, 0.3); }
@@ -4223,6 +4269,8 @@ input:checked + .slider:before {
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   display: flex;
   flex-direction: column;
+  width: 100%;
+  height: 100%;
 }
 .card:hover {
   border-color: rgba(255, 255, 255, 0.15);
@@ -4812,76 +4860,192 @@ input:checked + .slider:before {
   </div>
 </div>
 <div class="wrap">
-<div class="metrics"><div class="mc blue" onclick="promptUpdateCapital()"><div class="mc-lbl">Capital</div><div class="mc-val" id="mCap">—</div><div class="mc-sub" id="mCapSub">Base: —</div></div><div class="mc purple"><div class="mc-lbl">Total P&L</div><div class="mc-val" id="mPnl">—</div><div class="mc-sub" id="mPnlPct">—</div></div><div class="mc orange" style="cursor:pointer;" onclick="showOverallCharges()"><div class="mc-lbl">Total Charges</div><div class="mc-val" id="mCharges">—</div><div class="mc-sub" id="mChargesSub">—</div></div><div class="mc green"><div class="mc-lbl">Win Rate</div><div class="mc-val g" id="mWR">—</div><div class="mc-sub" id="mWL">— W / — L</div></div><div class="mc gold"><div class="mc-lbl">Avg Win</div><div class="mc-val g" id="mAW">—</div><div class="mc-sub" id="mRR">R:R —</div></div><div class="mc red"><div class="mc-lbl">Avg Loss</div><div class="mc-val r" id="mAL">—</div><div class="mc-sub" id="mTC">— trades</div></div><div class="mc teal"><div class="mc-lbl">Best Trade</div><div class="mc-val g" id="mBest">—</div><div class="mc-sub" id="mWorst">Worst: —</div></div><div class="mc purple" id="vixCard"><div class="mc-lbl">India VIX</div><div class="mc-val" id="mVix">—</div><div class="mc-sub" id="mVixSub">Real-time Volatility</div></div></div>
-
-<!-- Smart Signal Guard Control Card -->
-<div class="card smart-card" style="margin-bottom:20px; border-color: rgba(124, 77, 255, 0.35); background: linear-gradient(135deg, rgba(124, 77, 255, 0.02) 0%, rgba(0, 240, 255, 0.01) 100%);">
-  <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.06); padding-bottom:12px; margin-bottom:16px;">
-    <div style="display:flex; align-items:center; gap:8px;">
-      <span style="font-size:18px;">🛡️</span>
-      <span style="font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:1.5px; color:#c7d2fe; text-shadow:0 0 10px rgba(124, 77, 255, 0.4)">Smart Signal Guard</span>
-    </div>
-    <!-- Custom Switch Toggle -->
-    <div style="display:flex; align-items:center; gap:10px;">
-      <span style="font-size:10px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.8px;">Guard Status</span>
-      <label class="switch">
-        <input type="checkbox" id="smartToggleInput" onchange="toggleSmartFilter(this.checked)">
-        <span class="slider round"></span>
-      </label>
+<div class="metrics">
+  <!-- Card 1: Capital -->
+  <div class="atropos mc-atropos">
+    <div class="atropos-scale">
+      <div class="atropos-rotate">
+        <div class="atropos-inner mc blue" onclick="promptUpdateCapital()">
+          <div class="mc-lbl" data-atropos-offset="3">Capital</div>
+          <div class="mc-val" id="mCap" data-atropos-offset="8">—</div>
+          <div class="mc-sub" id="mCapSub" data-atropos-offset="4">Base: —</div>
+        </div>
+      </div>
     </div>
   </div>
-  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); gap:16px;">
-    <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
-      <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Status</div>
-      <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace;" id="smartStatus">—</div>
+
+  <!-- Card 2: Total P&L -->
+  <div class="atropos mc-atropos">
+    <div class="atropos-scale">
+      <div class="atropos-rotate">
+        <div class="atropos-inner mc purple">
+          <div class="mc-lbl" data-atropos-offset="3">Total P&L</div>
+          <div class="mc-val" id="mPnl" data-atropos-offset="8">—</div>
+          <div class="mc-sub" id="mPnlPct" data-atropos-offset="4">—</div>
+        </div>
+      </div>
     </div>
-    <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
-      <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Historical Trades</div>
-      <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace; color:var(--blue);" id="smartSamples">—</div>
+  </div>
+
+  <!-- Card 3: Total Charges -->
+  <div class="atropos mc-atropos">
+    <div class="atropos-scale">
+      <div class="atropos-rotate">
+        <div class="atropos-inner mc orange" style="cursor:pointer;" onclick="showOverallCharges()">
+          <div class="mc-lbl" data-atropos-offset="3">Total Charges</div>
+          <div class="mc-val" id="mCharges" data-atropos-offset="8">—</div>
+          <div class="mc-sub" id="mChargesSub" data-atropos-offset="4">—</div>
+        </div>
+      </div>
     </div>
-    <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
-      <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Win / Loss</div>
-      <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace; color:var(--green);" id="smartRatio">—</div>
+  </div>
+
+  <!-- Card 4: Win Rate -->
+  <div class="atropos mc-atropos">
+    <div class="atropos-scale">
+      <div class="atropos-rotate">
+        <div class="atropos-inner mc green">
+          <div class="mc-lbl" data-atropos-offset="3">Win Rate</div>
+          <div class="mc-val g" id="mWR" data-atropos-offset="8">—</div>
+          <div class="mc-sub" id="mWL" data-atropos-offset="4">— W / — L</div>
+        </div>
+      </div>
     </div>
-    <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
-      <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Engine Accuracy</div>
-      <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace; color:var(--gold);" id="smartAccuracy">—</div>
+  </div>
+
+  <!-- Card 5: Avg Win -->
+  <div class="atropos mc-atropos">
+    <div class="atropos-scale">
+      <div class="atropos-rotate">
+        <div class="atropos-inner mc gold">
+          <div class="mc-lbl" data-atropos-offset="3">Avg Win</div>
+          <div class="mc-val g" id="mAW" data-atropos-offset="8">—</div>
+          <div class="mc-sub" id="mRR" data-atropos-offset="4">R:R —</div>
+        </div>
+      </div>
     </div>
-    <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
-      <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Blocked Signals</div>
-      <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace; color:var(--red);" id="smartFiltered">—</div>
+  </div>
+
+  <!-- Card 6: Avg Loss -->
+  <div class="atropos mc-atropos">
+    <div class="atropos-scale">
+      <div class="atropos-rotate">
+        <div class="atropos-inner mc red">
+          <div class="mc-lbl" data-atropos-offset="3">Avg Loss</div>
+          <div class="mc-val r" id="mAL" data-atropos-offset="8">—</div>
+          <div class="mc-sub" id="mTC" data-atropos-offset="4">— trades</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card 7: Best Trade -->
+  <div class="atropos mc-atropos">
+    <div class="atropos-scale">
+      <div class="atropos-rotate">
+        <div class="atropos-inner mc teal">
+          <div class="mc-lbl" data-atropos-offset="3">Best Trade</div>
+          <div class="mc-val g" id="mBest" data-atropos-offset="8">—</div>
+          <div class="mc-sub" id="mWorst" data-atropos-offset="4">Worst: —</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card 8: India VIX -->
+  <div class="atropos mc-atropos">
+    <div class="atropos-scale">
+      <div class="atropos-rotate">
+        <div class="atropos-inner mc purple" id="vixCard">
+          <div class="mc-lbl" data-atropos-offset="3">India VIX</div>
+          <div class="mc-val" id="mVix" data-atropos-offset="8">—</div>
+          <div class="mc-sub" id="mVixSub" data-atropos-offset="4">Real-time Volatility</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Smart Signal Guard Control Card -->
+<div class="atropos card-atropos">
+  <div class="atropos-scale">
+    <div class="atropos-rotate">
+      <div class="atropos-inner card smart-card" style="border-color: rgba(124, 77, 255, 0.35); background: linear-gradient(135deg, rgba(124, 77, 255, 0.02) 0%, rgba(0, 240, 255, 0.01) 100%);">
+        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.06); padding-bottom:12px; margin-bottom:16px;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:18px;">🛡️</span>
+            <span style="font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:1.5px; color:#c7d2fe; text-shadow:0 0 10px rgba(124, 77, 255, 0.4)">Smart Signal Guard</span>
+          </div>
+          <!-- Custom Switch Toggle -->
+          <div style="display:flex; align-items:center; gap:10px;">
+            <span style="font-size:10px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.8px;">Guard Status</span>
+            <label class="switch">
+              <input type="checkbox" id="smartToggleInput" onchange="toggleSmartFilter(this.checked)">
+              <span class="slider round"></span>
+            </label>
+          </div>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); gap:16px;">
+          <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
+            <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Status</div>
+            <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace;" id="smartStatus">—</div>
+          </div>
+          <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
+            <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Historical Trades</div>
+            <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace; color:var(--blue);" id="smartSamples">—</div>
+          </div>
+          <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
+            <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Win / Loss</div>
+            <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace; color:var(--green);" id="smartRatio">—</div>
+          </div>
+          <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
+            <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Engine Accuracy</div>
+            <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace; color:var(--gold);" id="smartAccuracy">—</div>
+          </div>
+          <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
+            <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Blocked Signals</div>
+            <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace; color:var(--red);" id="smartFiltered">—</div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
 
 <!-- AI Brain Control Card -->
-<div class="card ai-card" style="margin-bottom:20px; border-color: rgba(255, 0, 228, 0.35); background: linear-gradient(135deg, rgba(255, 0, 228, 0.02) 0%, rgba(157, 78, 221, 0.01) 100%);">
-  <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.06); padding-bottom:12px; margin-bottom:16px;">
-    <div style="display:flex; align-items:center; gap:8px;">
-      <span style="font-size:18px;">🧠</span>
-      <span style="font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:1.5px; color:#ffb3f7; text-shadow:0 0 10px rgba(255, 0, 228, 0.4)">AI Trading Brain</span>
-    </div>
-    <!-- Custom Switch Toggle -->
-    <div style="display:flex; align-items:center; gap:10px;">
-      <span style="font-size:10px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.8px;">Brain Status</span>
-      <label class="switch">
-        <input type="checkbox" id="aiToggleInput" onchange="toggleAIBrain(this.checked)">
-        <span class="slider round"></span>
-      </label>
-    </div>
-  </div>
-  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); gap:16px;">
-    <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
-      <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Status</div>
-      <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace;" id="aiStatus">—</div>
-    </div>
-    <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
-      <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Trained Samples</div>
-      <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace; color:var(--blue);" id="aiSamples">—</div>
-    </div>
-    <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
-      <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Model Accuracy</div>
-      <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace; color:var(--gold);" id="aiAccuracy">—</div>
+<div class="atropos card-atropos">
+  <div class="atropos-scale">
+    <div class="atropos-rotate">
+      <div class="atropos-inner card ai-card" style="border-color: rgba(255, 0, 228, 0.35); background: linear-gradient(135deg, rgba(255, 0, 228, 0.02) 0%, rgba(157, 78, 221, 0.01) 100%);">
+        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.06); padding-bottom:12px; margin-bottom:16px;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:18px;">🧠</span>
+            <span style="font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:1.5px; color:#ffb3f7; text-shadow:0 0 10px rgba(255, 0, 228, 0.4)">AI Trading Brain</span>
+          </div>
+          <!-- Custom Switch Toggle -->
+          <div style="display:flex; align-items:center; gap:10px;">
+            <span style="font-size:10px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.8px;">Brain Status</span>
+            <label class="switch">
+              <input type="checkbox" id="aiToggleInput" onchange="toggleAIBrain(this.checked)">
+              <span class="slider round"></span>
+            </label>
+          </div>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); gap:16px;">
+          <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
+            <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Status</div>
+            <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace;" id="aiStatus">—</div>
+          </div>
+          <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
+            <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Trained Samples</div>
+            <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace; color:var(--blue);" id="aiSamples">—</div>
+          </div>
+          <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.04); border-radius:8px; padding:10px; text-align:center;">
+            <div style="font-size:9px; color:var(--muted); text-transform:uppercase; font-weight:700; margin-bottom:4px; letter-spacing:0.5px;">Model Accuracy</div>
+            <div style="font-size:14px; font-weight:800; font-family:'JetBrains Mono',monospace; color:var(--gold);" id="aiAccuracy">—</div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -4940,7 +5104,43 @@ input:checked + .slider:before {
   </table>
 </div>
 
-<div class="charts"><div class="card eq-wrap"><div class="card-title" style="display:flex;justify-content:space-between;align-items:center;"><span>📊 PERFORMANCE TRAJECTORY</span><div class="chart-tabs"><button id="btnEquityWeb" class="chart-tab active" onclick="switchWebChart('equity')">📈 Equity Curve</button><button id="btnDrawdownWeb" class="chart-tab" onclick="switchWebChart('drawdown')">📉 Drawdown</button></div></div><div class="chart-box" style="position:relative;" id="equityWebChartContainer"><canvas id="eq"></canvas><canvas id="eqSpark"></canvas><div class="eq-glow"></div></div><div class="chart-box" style="position:relative;display:none;" id="drawdownWebChartContainer"><canvas id="ddChart"></canvas></div></div><div class="card"><div class="card-title">Win/Loss Per Trade</div><div class="chart-box" style="position:relative;"><canvas id="wl"></canvas></div></div></div>
+<div class="charts">
+  <div class="atropos card-atropos">
+    <div class="atropos-scale">
+      <div class="atropos-rotate">
+        <div class="atropos-inner card eq-wrap">
+          <div class="card-title" style="display:flex;justify-content:space-between;align-items:center;">
+            <span>📊 PERFORMANCE TRAJECTORY</span>
+            <div class="chart-tabs">
+              <button id="btnEquityWeb" class="chart-tab active" onclick="switchWebChart('equity')">📈 Equity Curve</button>
+              <button id="btnDrawdownWeb" class="chart-tab" onclick="switchWebChart('drawdown')">📉 Drawdown</button>
+            </div>
+          </div>
+          <div class="chart-box" style="position:relative;" id="equityWebChartContainer">
+            <canvas id="eq"></canvas>
+            <canvas id="eqSpark"></canvas>
+            <div class="eq-glow"></div>
+          </div>
+          <div class="chart-box" style="position:relative;display:none;" id="drawdownWebChartContainer">
+            <canvas id="ddChart"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="atropos card-atropos">
+    <div class="atropos-scale">
+      <div class="atropos-rotate">
+        <div class="atropos-inner card">
+          <div class="card-title">Win/Loss Per Trade</div>
+          <div class="chart-box" style="position:relative;">
+            <canvas id="wl"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div class="bottom"><div class="card"><div class="card-title" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;"><span>Trade History</span><div style="display:flex; align-items:center; gap:8px;"><label for="tradeDateFilter" style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--muted); font-weight:700;">Filter by Date:</label><input type="date" id="tradeDateFilter" style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:6px; padding:6px 10px; color:#fff; font-size:12px; outline:none; font-family:'Inter',sans-serif; transition:border-color 0.2s;" onchange="renderTradesTable()" onfocus="this.style.borderColor='rgba(0,240,255,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.08)'"><button onclick="clearDateFilter()" style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); border-radius:6px; padding:6px 12px; color:var(--muted); font-size:11px; font-weight:700; cursor:pointer; transition:all 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.1)'; this.style.color='#fff';" onmouseout="this.style.background='rgba(255,255,255,0.05)'; this.style.color='var(--muted)';">Clear</button></div></div><div class="table-scroll"><table><thead><tr><th>Index</th><th>Date</th><th>Entry Time</th><th>Exit Time</th><th>Dir</th><th>Strike</th><th>Entry</th><th>Exit</th><th>Charges</th><th>PnL (Net)</th><th>Reason</th></tr></thead><tbody id="tTbl"><tr><td colspan="11" class="empty">No trades yet</td></tr></tbody></table></div></div></div>
 
@@ -6265,6 +6465,9 @@ async function load(){
     updateChartColors();
     lastStats = d.stats;
     document.getElementById('rb').textContent = '✓ Updated ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    if (typeof initDashboardAtropos === 'function') {
+      initDashboardAtropos();
+    }
   } catch(e){ document.getElementById('rb').textContent = 'Error'; }
 }
 let lastStats = null;
@@ -6328,30 +6531,36 @@ function renderTradesTable() {
         const className = idx.toLowerCase() + '-card';
         const titleClass = idx.toLowerCase();
         return `
-          <div class="card ${className}">
-            <div class="idx-hdr">
-              <span class="idx-title ${titleClass}">⬡ ${displayName}</span>
-              <span class="idx-pnl" id="${idx.toLowerCase()}Pnl">—</span>
-            </div>
-            <div class="index-table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Entry Time</th>
-                    <th>Exit Time</th>
-                    <th>Dir</th>
-                    <th>Strike</th>
-                    <th>Entry</th>
-                    <th>Exit</th>
-                    <th>Charges</th>
-                    <th>PnL (Net)</th>
-                    <th>Reason</th>
-                  </tr>
-                </thead>
-                <tbody id="${idx.toLowerCase()}Tbl">
-                  <tr><td colspan="9" class="empty">No trades yet</td></tr>
-                </tbody>
-              </table>
+          <div class="atropos card-atropos">
+            <div class="atropos-scale">
+              <div class="atropos-rotate">
+                <div class="atropos-inner card ${className}">
+                  <div class="idx-hdr">
+                    <span class="idx-title ${titleClass}">⬡ ${displayName}</span>
+                    <span class="idx-pnl" id="${idx.toLowerCase()}Pnl">—</span>
+                  </div>
+                  <div class="index-table-scroll">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Entry Time</th>
+                          <th>Exit Time</th>
+                          <th>Dir</th>
+                          <th>Strike</th>
+                          <th>Entry</th>
+                          <th>Exit</th>
+                          <th>Charges</th>
+                          <th>PnL (Net)</th>
+                          <th>Reason</th>
+                        </tr>
+                      </thead>
+                      <tbody id="${idx.toLowerCase()}Tbl">
+                        <tr><td colspan="9" class="empty">No trades yet</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>`;
       }).join('');
@@ -7246,8 +7455,49 @@ window.addEventListener('keydown', (e) => {
     if (resetConfirmModal) resetConfirmModal.style.display = 'none';
     const sqModal = document.getElementById('squareoffSelectModal');
     if (sqModal) sqModal.style.display = 'none';
+});
+
+// AnimMasterLib mouse/touch coordinate tracking background listener
+document.addEventListener('mousemove', (e) => {
+  document.documentElement.style.setProperty('--x', e.clientX + 'px');
+  document.documentElement.style.setProperty('--y', e.clientY + 'px');
+});
+document.addEventListener('touchmove', (e) => {
+  if (e.touches.length > 0) {
+    document.documentElement.style.setProperty('--x', e.touches[0].clientX + 'px');
+    document.documentElement.style.setProperty('--y', e.touches[0].clientY + 'px');
   }
 });
+
+// AtroposJS initialization/re-initialization tracker
+let activeAtroposes = [];
+function initDashboardAtropos() {
+  // Destroy previous instances to avoid memory leaks
+  activeAtroposes.forEach(inst => {
+    if (inst && typeof inst.destroy === 'function') {
+      try { inst.destroy(); } catch(err) {}
+    }
+  });
+  activeAtroposes = [];
+
+  // Initialize Atropos instances on metrics, control cards, performance curves, and index break tables
+  document.querySelectorAll('.atropos').forEach(el => {
+    try {
+      const inst = Atropos({
+        el: el,
+        activeOffset: 12,
+        shadow: false,
+        rotateTouch: true,
+        rotateXMax: 12,
+        rotateYMax: 12,
+        stretch: 0.04
+      });
+      activeAtroposes.push(inst);
+    } catch(err) {
+      console.warn("Failed to initialize Atropos on element:", el, err);
+    }
+  });
+}
 
 checkAuthStatus();
 </script>
