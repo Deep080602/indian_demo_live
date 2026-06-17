@@ -5330,9 +5330,16 @@ async function logoutUser() {
 
 async function checkAuthStatus() {
   try {
-    await fetch('/api/logout', { method: 'POST' });
-  } catch(e) {}
-  showAuthScreen();
+    const res = await fetch('/api/auth/status');
+    const data = await res.json();
+    if (res.ok && data.authenticated) {
+      showDashboardScreen(data.username);
+    } else {
+      showAuthScreen();
+    }
+  } catch(e) {
+    showAuthScreen();
+  }
 }
 
 let eqC=null, wlC=null, ddC=null;
