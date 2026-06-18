@@ -386,13 +386,14 @@ def api_login():
     user_id = db_helper.verify_user(username, password)
     if user_id != -1:
         session["user_id"] = user_id
-        session.permanent = True
+        session.permanent = False
         log.info(f"[AUTH] User '{username}' (ID: {user_id}) logged in successfully.")
         
-        # Enforce DEMO mode upon login
-        db_helper.update_user_config(user_id, {"live_trading": 0})
+        # Enforce DEMO mode upon login and automatically activate trading
+        db_helper.update_user_config(user_id, {"live_trading": 0, "trading_active": 1})
         global active_books
         active_books[user_id] = Book(user_id)
+        active_books[user_id].trading_active = True
         
         return jsonify({"status": "success", "message": "Logged in successfully", "user_id": user_id})
     else:
@@ -402,7 +403,12 @@ def api_login():
 def api_logout():
     user_id = session.pop("user_id", None)
     if user_id:
-        log.info(f"[AUTH] User ID {user_id} logged out.")
+        db_helper.update_user_config(user_id, {"trading_active": 0})
+        global active_books
+        if user_id in active_books:
+            active_books[user_id].trading_active = False
+            active_books.pop(user_id, None)
+        log.info(f"[AUTH] User ID {user_id} logged out and algo paused.")
     return jsonify({"status": "success", "message": "Logged out successfully"})
 
 @_dashboard_app.route("/api/auth/status")
@@ -2762,11 +2768,13 @@ class Book:
                 try:
                     option_price = float(sig["entry"])
                     cost_per_lot = option_price * lot_size
-                    lots = math.floor(available_balance / cost_per_lot)
+                    # Size based on allocated index capital, capped by actual available broker balance
+                    trade_capital = min(available_balance, self.capital.get(index, index_capital))
+                    lots = math.floor(trade_capital / cost_per_lot)
                     if lots < 1:
                         lots = 1
                     lots_calculated = True
-                    log.info(f"[RISK] [LIVE SIZING] [{self.username}] {index}: Balance=Rs.{available_balance:,.2f} | Option Price=Rs.{option_price:.2f} | Lots={lots}")
+                    log.info(f"[RISK] [LIVE SIZING] [{self.username}] {index}: Balance=Rs.{available_balance:,.2f} | Allocated Index Capital=Rs.{self.capital.get(index, index_capital):,.2f} | Target Capital=Rs.{trade_capital:,.2f} | Option Price=Rs.{option_price:.2f} | Lots={lots}")
                 except Exception as e:
                     log.error(f"[RISK] [{self.username}] Error calculating live lots: {e}")
 
@@ -3166,7 +3174,7 @@ def run():
             log.info(f"[MAIN] {now_s} Pre-market")
             _sleep(60); continue
 
-        active_ids = db_helper.get_active_user_ids()
+        active_ids = [uid for uid, book in list(active_books.items()) if book.trading_active]
 
         if _is_post():
             if not _done:
@@ -3307,7 +3315,7 @@ def run():
         sleep_dur = 2 if total_open_positions > 0 else 10
         _sleep(sleep_dur)
 
-    active_ids = db_helper.get_active_user_ids()
+    active_ids = [uid for uid, book in list(active_books.items()) if book.trading_active]
     for uid in active_ids:
         try:
             book = get_user_book(uid)
@@ -5316,6 +5324,7 @@ async function handleAuthSubmit(event) {
 }
 
 async function logoutUser() {
+  sessionStorage.removeItem('session_active');
   try {
     await fetch('/api/logout', { method: 'POST' });
   } catch(e) {}
@@ -7507,7 +7516,26 @@ function initDashboardAtropos() {
   });
 }
 
-checkAuthStatus();
+// Submit login form on Enter keypress
+const authForm = document.getElementById('authForm');
+if (authForm) {
+  authForm.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const submitBtn = document.getElementById('authSubmitBtn');
+      if (submitBtn) submitBtn.click();
+    }
+  });
+}
+
+// Force fresh credentials request if the browser/tab is reopened
+if (!sessionStorage.getItem('session_active')) {
+  logoutUser().then(() => {
+    sessionStorage.setItem('session_active', 'true');
+  });
+} else {
+  checkAuthStatus();
+}
 </script>
 
 <!-- Modal for Selecting Contract to Square Off -->

@@ -509,6 +509,7 @@ def get_all_users() -> list:
                        uc.trading_active, uc.groww_client_id, uc.active_broker, uc.live_trading, uc.capital 
                 FROM users u
                 LEFT JOIN user_config uc ON u.id = uc.user_id
+                ORDER BY CASE WHEN u.username = 'admin' THEN 0 ELSE 1 END, u.is_admin DESC, u.id ASC
             """)
             rows = c.fetchall()
             res = []
