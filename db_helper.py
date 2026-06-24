@@ -74,9 +74,16 @@ def init_db():
                 target_per_trade_pct REAL DEFAULT 0.15,
                 sl_on_premium_pct REAL DEFAULT 0.05,
                 tp_on_premium_pct REAL DEFAULT 0.15,
+                broker_login_date TEXT DEFAULT '',
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
         ''')
+        
+        # Add columns to user_config table if they don't exist for legacy databases
+        try:
+            c.execute("ALTER TABLE user_config ADD COLUMN broker_login_date TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
         
         # Ensure default admin user exists
         c.execute("SELECT id FROM users WHERE username = 'admin'")
@@ -618,5 +625,89 @@ def update_user_active(user_id) -> bool:
     except Exception as e:
         log.error(f"[DB] Error updating user active time for ID {user_id}: {e}")
         return False
+
+def check_and_expire_broker_session(user_id) -> bool:
+    """
+    Checks if the broker session for the user has expired (i.e. login date is not today).
+    If expired, clears groww_client_id, groww_pin, broker_login_date, and live_trading in user_config.
+    Returns True if expired and successfully cleared/updated in DB, False otherwise.
+    """
+    try:
+        try:
+            from zoneinfo import ZoneInfo
+            IST = ZoneInfo("Asia/Kolkata")
+        except ImportError:
+            IST = None
+        
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+        
+        with get_db_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("SELECT groww_client_id, groww_pin, broker_login_date, live_trading FROM user_config WHERE user_id = ?", (user_id,))
+            row = c.fetchone()
+            if not row:
+                return False
+                
+            row_dict = dict(row)
+            login_date = row_dict.get("broker_login_date") or ""
+            
+            # If the login date is not today, and we have credentials or active live mode, clear them!
+            has_credentials = bool(row_dict.get("groww_client_id") or row_dict.get("groww_pin"))
+            is_live = bool(row_dict.get("live_trading", 0))
+            
+            if login_date != today_str and (has_credentials or is_live):
+                log.info(f"[DB] 🔐 Expiring broker session for user {user_id}. Login date was '{login_date}', today is '{today_str}'.")
+                c.execute("""
+                    UPDATE user_config 
+                    SET groww_client_id = '', 
+                        groww_pin = '', 
+                        live_trading = 0, 
+                        broker_login_date = '' 
+                    WHERE user_id = ?
+                """, (user_id,))
+                conn.commit()
+                return True
+    except Exception as e:
+        log.error(f"[DB] Error checking/expiring broker session for user {user_id}: {e}")
+    return False
+
+def get_all_user_ids() -> list:
+    """Get list of all registered user IDs."""
+    try:
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute("SELECT id FROM users")
+            return [row[0] for row in c.fetchall()]
+    except Exception as e:
+        log.error(f"[DB] Error getting all user IDs: {e}")
+        return []
+
+def get_active_trading_user_ids() -> list:
+    """Get list of user IDs who logged in today and have trading active."""
+    try:
+        try:
+            from zoneinfo import ZoneInfo
+            IST = ZoneInfo("Asia/Kolkata")
+        except ImportError:
+            IST = None
+        
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+        
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute("""
+                SELECT u.id 
+                FROM users u
+                JOIN user_config uc ON u.id = uc.user_id
+                WHERE uc.trading_active = 1 
+                  AND u.last_login_at LIKE ?
+            """, (f"{today_str}%",))
+            return [row[0] for row in c.fetchall()]
+    except Exception as e:
+        log.error(f"[DB] Error getting active trading user IDs: {e}")
+        return []
+
+
 
 

@@ -193,6 +193,7 @@ active_books: Dict[int, 'Book'] = {}
 def get_user_book(user_id: int) -> 'Book':
     """Get or create the user's Book instance in memory."""
     global active_books
+    check_user_session_expiry(user_id)
     if user_id not in active_books:
         active_books[user_id] = Book(user_id)
     return active_books[user_id]
@@ -289,6 +290,29 @@ def check_and_clear_expired_credentials():
             log.info("[SECURITY] 🔐 Expired credentials cleared from .env.")
     except Exception as e:
         log.error(f"[SECURITY] Error checking expired credentials: {e}")
+
+def check_user_session_expiry(user_id: int):
+    """
+    Checks if a user's broker session has expired. If so, clears the database
+    config and pops the user from active_books so the in-memory book is re-created.
+    """
+    try:
+        if db_helper.check_and_expire_broker_session(user_id):
+            global active_books
+            if user_id in active_books:
+                log.info(f"[SECURITY] 🔐 [{active_books[user_id].username}] Daily broker session expired after midnight. Logging out from live broker.")
+                active_books.pop(user_id, None)
+    except Exception as e:
+        log.error(f"[SECURITY] Error in check_user_session_expiry for user {user_id}: {e}")
+
+def check_all_sessions_expiry():
+    """Checks and expires sessions for all users."""
+    try:
+        user_ids = db_helper.get_all_user_ids()
+        for uid in user_ids:
+            check_user_session_expiry(uid)
+    except Exception as e:
+        log.error(f"[SECURITY] Error in check_all_sessions_expiry: {e}")
 
 def save_trading_indices_to_env(indices_list):
     """Save the active trading indices to .env so they persist across runs."""
@@ -434,6 +458,7 @@ def api_vix_refresh():
 @login_required
 def api_data():
     user_id = session["user_id"]
+    check_all_sessions_expiry()
     is_admin = db_helper.is_admin_user(user_id)
     u_config = db_helper.get_user_config(user_id)
     if not u_config:
@@ -843,9 +868,11 @@ def api_broker_credentials():
         log.error(f"[API] [{u_config['username']}] Error testing Groww client: {e}")
         return jsonify({"status": "error", "message": f"Groww API connection failed: {e}"}), 400
         
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
     db_helper.update_user_config(user_id, {
         "groww_client_id": client_id,
-        "groww_pin": access_token
+        "groww_pin": access_token,
+        "broker_login_date": today_str
     })
         
     if user_id in active_books:
@@ -3174,6 +3201,11 @@ def run():
             log.info(f"[MAIN] {now_s} Pre-market")
             _sleep(60); continue
 
+        # Auto-load active trading users that are not yet in memory
+        for uid in db_helper.get_active_trading_user_ids():
+            if uid not in active_books:
+                get_user_book(uid)
+
         active_ids = [uid for uid, book in list(active_books.items()) if book.trading_active]
 
         if _is_post():
@@ -5109,6 +5141,16 @@ input:checked + .slider:before {
     <tbody id="openTbl">
       <!-- Open positions injected here -->
     </tbody>
+    <tfoot id="openTfoot" style="display: none; border-top: 2px solid rgba(255, 255, 255, 0.12); background: rgba(255, 255, 255, 0.02);">
+      <tr>
+        <td colspan="5" style="font-weight: 800; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); padding: 12px 10px;">Total Active</td>
+        <td id="totalQty" style="font-weight: 800; font-size: 11px; color: #fff; padding: 12px 10px;">—</td>
+        <td colspan="3" style="padding: 12px 10px;"></td>
+        <td id="totalMaxRR" style="font-weight: 800; font-size: 11px; text-align: center; line-height: 1.45; padding: 12px 10px;">—</td>
+        <td id="totalCharges" style="font-weight: 800; font-size: 11px; color: var(--blue); padding: 12px 10px;">—</td>
+        <td id="totalPnl" style="font-weight: 800; font-size: 12.5px; padding: 12px 10px;">—</td>
+      </tr>
+    </tfoot>
   </table>
 </div>
 
@@ -6204,6 +6246,8 @@ async function load(){
       opc.style.display = 'block';
       ac.textContent = '0 ACTIVE';
       ot.innerHTML = '<tr><td colspan="12" class="empty">No active positions</td></tr>';
+      const otf = document.getElementById('openTfoot');
+      if (otf) otf.style.display = 'none';
     } else {
       opc.style.display = 'block';
       ac.textContent = d.open_positions.length + ' ACTIVE';
@@ -6263,6 +6307,53 @@ async function load(){
         });
       } else {
         ot.innerHTML = d.open_positions.map(getOpenPositionRowHtml).join('');
+      }
+      
+      // Update Active Positions Footer Totals
+      const otf = document.getElementById('openTfoot');
+      if (otf) {
+        otf.style.display = 'table-footer-group';
+        
+        let totQty = 0;
+        let totLots = 0;
+        let totMaxLoss = 0;
+        let totMaxProfit = 0;
+        let totCharges = 0;
+        let totPnl = 0;
+        
+        d.open_positions.forEach(p => {
+          totQty += +p.contracts;
+          totLots += +p.lots || 0;
+          const maxLossVal = Math.round((p.entry - p.sl) * p.contracts);
+          const maxProfit = Math.round((p.tp - p.entry) * p.contracts);
+          totMaxLoss += maxLossVal;
+          totMaxProfit += maxProfit;
+          totCharges += +p.charges || 0;
+          totPnl += +p.pnl || 0;
+        });
+        
+        const totalQtyEl = document.getElementById('totalQty');
+        if (totalQtyEl) totalQtyEl.textContent = `${totQty} (${totLots}L)`;
+        
+        const lossSign = totMaxLoss < 0 ? '+' : '-';
+        const lossClass = totMaxLoss < 0 ? 'g' : 'r';
+        const maxLossDisp = Math.abs(totMaxLoss);
+        const totalMaxRREl = document.getElementById('totalMaxRR');
+        if (totalMaxRREl) {
+          totalMaxRREl.innerHTML = `
+            <div style="font-weight:700;"><span class="${lossClass}">${lossSign}₹${fi(maxLossDisp)}</span></div>
+            <div style="font-weight:700;"><span class="g">+₹${fi(totMaxProfit)}</span></div>
+          `;
+        }
+        
+        const totalChargesEl = document.getElementById('totalCharges');
+        if (totalChargesEl) totalChargesEl.textContent = totCharges ? 'Rs.' + fi(totCharges) : '—';
+        
+        const totalPnlEl = document.getElementById('totalPnl');
+        if (totalPnlEl) {
+          totalPnlEl.textContent = fp(totPnl);
+          totalPnlEl.className = pc(totPnl);
+        }
       }
     }
     
