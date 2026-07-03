@@ -846,15 +846,31 @@ def api_broker_credentials():
     if broker != "GROWW":
         return jsonify({"status": "error", "message": "Only GROWW broker is supported."}), 400
 
-    if not client_id:
-        return jsonify({"status": "error", "message": "Client ID is required."}), 400
-        
+    # Auto-resolve REUSE_SAVED_TOKEN before JWT checks
     if access_token == "REUSE_SAVED_TOKEN":
         access_token = u_config.get("groww_pin", "")
         if not access_token:
-            return jsonify({"status": "error", "message": "No saved Trading PIN found. Please enter one."}), 400
-    elif not access_token:
-        return jsonify({"status": "error", "message": "Trading PIN is required."}), 400
+            return jsonify({"status": "error", "message": "No saved Trading PIN / Token found. Please enter one."}), 400
+
+    # Normalize JWT credentials: if either starts with eyJ, set both to the JWT token
+    is_jwt = False
+    jwt_token = ""
+    if client_id and client_id.startswith("eyJ"):
+        is_jwt = True
+        jwt_token = client_id
+    elif access_token and access_token.startswith("eyJ"):
+        is_jwt = True
+        jwt_token = access_token
+        
+    if is_jwt:
+        client_id = jwt_token
+        access_token = jwt_token
+
+    if not client_id:
+        return jsonify({"status": "error", "message": "Client ID is required."}), 400
+        
+    if not access_token:
+        return jsonify({"status": "error", "message": "Trading PIN / Secret is required."}), 400
         
     try:
         from groww_client import GrowwClientWrapper
@@ -1117,6 +1133,7 @@ def api_indices_update():
     total_config_capital = sum(CAPITAL_PER_INDEX.get(idx, 100000.0) for idx in selected_upper)
     saved_capital = book.total_capital
     
+    book.capital = {}
     for idx in selected_upper:
         if idx not in book.open:
             book.open[idx] = {}
@@ -1278,6 +1295,11 @@ def api_option_chain(index):
 @login_required
 def api_place_manual_trade():
     try:
+        # Check standard Indian stock market hours (09:15 to 15:30 IST on weekdays)
+        is_open, msg = _is_market_hours()
+        if not is_open:
+            return jsonify({"status": "error", "message": msg}), 400
+
         user_id = session["user_id"]
         book = get_user_book(user_id)
         
@@ -1494,6 +1516,20 @@ def _is_weekend() -> bool:    return _now().weekday() >= 5
 def _is_pre() -> bool:        return not _is_weekend() and _now_hm() < _hm(MARKET_OPEN)
 def _is_post() -> bool:       return not _is_weekend() and _now_hm() >= _hm(MARKET_CLOSE)
 def _in_session() -> bool:    return not _is_weekend() and _hm(MARKET_OPEN) <= _now_hm() < _hm(MARKET_CLOSE)
+
+def _is_market_hours() -> Tuple[bool, str]:
+    """Check if current time is within standard Indian market hours (09:15 to 15:30 IST on weekdays)."""
+    now_ist = _now()
+    if now_ist.weekday() >= 5:
+        return False, "Market is closed on weekends."
+    now_hm = now_ist.hour * 60 + now_ist.minute
+    start_hm = 9 * 60 + 15
+    end_hm = 15 * 60 + 30
+    if now_hm < start_hm:
+        return False, "Market has not opened yet. Market hours are 09:15 to 15:30 IST."
+    if now_hm >= end_hm:
+        return False, "Market is closed. Market hours are 09:15 to 15:30 IST."
+    return True, ""
 def _is_noisy() -> bool:
     """Skip first 15 mins and last 60 mins."""
     hm = _now_hm()
@@ -1714,6 +1750,72 @@ def _get_groww_contract_ltp(contract_id: str) -> float:
     return 0.0
 
 
+def _fetch_groww_html_chain(index: str, expiry_date: str) -> Optional[dict]:
+    """
+    Fetch the option chain from Groww's public Next.js pre-rendered HTML page.
+    Used on expiry days to get the next week's real option chain.
+    """
+    if index not in INDEX_MAP:
+        return None
+    _, chain_path = INDEX_MAP[index]
+    url = f"https://groww.in/options/{chain_path}?expiry={expiry_date}"
+    try:
+        s = _get_groww_session()
+        r = s.get(url, timeout=10)
+        if r.status_code != 200:
+            log.debug(f"[GROWW-HTML] HTTP {r.status_code} fetching HTML chain for {index} ({expiry_date})")
+            return None
+            
+        m = re.findall(r'<script[^>]*>(.*?)</script>', r.text, re.DOTALL)
+        for script_content in m:
+            txt = script_content.strip()
+            if "optionContracts" in txt:
+                start_idx = txt.find('{"props":')
+                if start_idx != -1:
+                    json_str = txt[start_idx:]
+                    if json_str.endswith('}'):
+                        data = json.loads(json_str)
+                        page_props = data.get("props", {}).get("pageProps", {})
+                        oc = page_props.get("data", {}).get("optionChain", {})
+                        
+                        contracts = oc.get("optionContracts", [])
+                        if not contracts:
+                            continue
+                            
+                        records = []
+                        for row in contracts:
+                            strike = row.get("strikePrice", 0) / 100.0
+                            ce = row.get("ce", {}) or {}
+                            pe = row.get("pe", {}) or {}
+                            
+                            ce_ltp = float(ce.get("liveData", {}).get("ltp", 0.0))
+                            pe_ltp = float(pe.get("liveData", {}).get("ltp", 0.0))
+                            
+                            records.append({
+                                "strike": strike,
+                                "ce_ltp": ce_ltp,
+                                "pe_ltp": pe_ltp,
+                                "ce_symbol": ce.get("growwContractId"),
+                                "pe_symbol": pe.get("growwContractId"),
+                                "ce_token": ce.get("token"),
+                                "pe_token": pe.get("token"),
+                            })
+                            
+                        records.sort(key=lambda x: x["strike"])
+                        company = page_props.get("data", {}).get("company", {})
+                        spot = float(company.get("liveData", {}).get("ltp", 0.0))
+                        
+                        if spot <= 0:
+                            spot = float(oc.get("aggregatedDetails", {}).get("maxOI", 0.0))
+                            
+                        if len(records) > 0:
+                            log.info(f"[GROWW-HTML] {index}: Successfully parsed real HTML chain for {expiry_date} | spot={spot:.2f} | {len(records)} strikes")
+                            return {"spot": spot, "records": records}
+    except Exception as e:
+        log.debug(f"[GROWW-HTML] Exception fetching/parsing HTML chain for {index} ({expiry_date}): {e}")
+    return None
+
+
 def _fetch_groww_chain(index: str = "NIFTY") -> Optional[dict]:
     """Fetch underlying spot price and option chain. Uses SDK for spot in live mode, JSON API for chain."""
     if index not in INDEX_MAP:
@@ -1724,10 +1826,22 @@ def _fetch_groww_chain(index: str = "NIFTY") -> Optional[dict]:
     
     # ─── Expiry Day Rollover ───
     # On the expiry day of this index, the unauthenticated Groww JSON API only returns today's expiring options (which are melting rapidly).
-    # To avoid this theta decay, we roll over to the next week's expiry by transparently simulating the option chain.
+    # To avoid this theta decay, we roll over to the next week's expiry by transparently scraping/simulating the option chain.
     em = ExpiryManager(index)
     if em.is_expiry_day():
         next_exp_str = em.get_expiry()
+        
+        # 1. Try to fetch the real option chain for the next expiry via HTML scraping
+        try:
+            html_chain = _fetch_groww_html_chain(index, next_exp_str)
+            if html_chain and html_chain.get("records"):
+                log.info(f"[GROWW] Rollover: Today is {index} expiry. Theta is melting, so rolling over to next expiry {next_exp_str}. "
+                         f"Loaded REAL option chain via HTML scraping.")
+                return html_chain
+        except Exception as e_html:
+            log.warning(f"[GROWW] Failed to fetch real HTML chain for {index} rollover: {e_html}. Falling back to simulation.")
+            
+        # 2. Fallback to simulation if HTML scraping fails
         try:
             spot = None
             if _live_trading and _active_broker == "GROWW":
@@ -2313,10 +2427,21 @@ def _signal(index: str = "NIFTY") -> Optional[dict]:
 
     sl   = round(entry - premium_risk, 1)
     risk = entry - sl
-    tp   = round(entry + risk * 1.8, 1)
+    
+    # Volatility-adjusted dynamic target RRR
+    # Calm markets (<13.0 VIX): 1.5x risk
+    # Normal markets (13.0 - 18.0 VIX): 1.8x risk
+    # High-momentum markets (>18.0 VIX): 2.2x risk
+    target_ratio = 1.8
+    if vix < 13.0:
+        target_ratio = 1.5
+    elif vix > 18.0:
+        target_ratio = 2.2
+        
+    tp   = round(entry + risk * target_ratio, 1)
 
-    # Sanity check on risk/reward
-    if risk <= 0 or abs(tp - entry) / risk < 1.5:
+    # Sanity check on risk/reward (relaxed slightly for calm markets dynamic RRR)
+    if risk <= 0 or abs(tp - entry) / risk < 1.4:
         return None
 
     _last_signal[index] = (direction, _now())
@@ -2584,6 +2709,10 @@ class Pos:
     is_super_order: bool = False
     trailing_sl_enabled: bool = True
     is_live:       bool = False
+    initial_sl:    float = 0.0
+    breakeven_triggered: bool = False
+    original_lots: int = 0
+    partial_booked: bool = False
 
     @property
     def cost(self):    return self.entry * self.contracts
@@ -2630,6 +2759,18 @@ class Book:
         self.target_per_trade_pct = u_config.get("target_per_trade_pct", 0.15)
         self.sl_on_premium_pct = u_config.get("sl_on_premium_pct", 0.05)
         self.tp_on_premium_pct = u_config.get("tp_on_premium_pct", 0.15)
+        
+        # Pulse-Guard Risk Engine settings
+        self.breakeven_enabled = bool(u_config.get("breakeven_enabled", cfg.breakeven_enabled))
+        self.breakeven_trigger_ratio = float(u_config.get("breakeven_trigger_ratio", cfg.breakeven_trigger_ratio))
+        self.breakeven_buffer_pts = float(u_config.get("breakeven_buffer_pts", cfg.breakeven_buffer_pts))
+        self.multi_stage_trail_enabled = bool(u_config.get("multi_stage_trail_enabled", cfg.multi_stage_trail_enabled))
+        self.partial_booking_enabled = bool(u_config.get("partial_booking_enabled", cfg.partial_booking_enabled))
+        self.partial_booking_trigger_ratio = float(u_config.get("partial_booking_trigger_ratio", cfg.partial_booking_trigger_ratio))
+        self.partial_booking_pct = float(u_config.get("partial_booking_pct", cfg.partial_booking_pct))
+        self.dynamic_rrr_enabled = bool(u_config.get("dynamic_rrr_enabled", cfg.dynamic_rrr_enabled))
+        self.time_decay_exit_enabled = bool(u_config.get("time_decay_exit_enabled", cfg.time_decay_exit_enabled))
+        self.time_decay_timeout_mins = int(u_config.get("time_decay_timeout_mins", cfg.time_decay_timeout_mins))
         
         self.groww_client_id = u_config.get("groww_client_id", "")
         self.groww_pin = u_config.get("groww_pin", "")
@@ -2778,9 +2919,8 @@ class Book:
         lot_size = config["lot_size"]
 
         # Dynamic lots based on index capital or available broker balance
-        index_capital = self.capital[index]
-        lots_calculated = False
-        lots = 1
+        index_capital = self.capital.get(index, self.capital_amount / (len(self.trading_indices) or 1))
+        trade_capital = index_capital
         
         if self.live_trading:
             available_balance = 0.0
@@ -2792,48 +2932,46 @@ class Book:
                     log.error(f"[RISK] [{self.username}] Failed to get live Groww capital: {e}")
 
             if available_balance > 0:
-                try:
-                    option_price = float(sig["entry"])
-                    cost_per_lot = option_price * lot_size
-                    # Size based on allocated index capital, capped by actual available broker balance
-                    trade_capital = min(available_balance, self.capital.get(index, index_capital))
-                    lots = math.floor(trade_capital / cost_per_lot)
-                    if lots < 1:
-                        lots = 1
-                    lots_calculated = True
-                    log.info(f"[RISK] [LIVE SIZING] [{self.username}] {index}: Balance=Rs.{available_balance:,.2f} | Allocated Index Capital=Rs.{self.capital.get(index, index_capital):,.2f} | Target Capital=Rs.{trade_capital:,.2f} | Option Price=Rs.{option_price:.2f} | Lots={lots}")
-                except Exception as e:
-                    log.error(f"[RISK] [{self.username}] Error calculating live lots: {e}")
-
-        if not lots_calculated:
-            if self.live_trading:
-                # Dynamic index capital weight fallback
+                # Size based on allocated index capital, capped by actual available broker balance
+                trade_capital = min(available_balance, index_capital)
+            else:
+                # If live balance fetch failed or returned 0, fallback to weighted broker capital if possible
                 if self.active_broker == "GROWW" and self.groww_client:
                     try:
                         broker_cap = self.groww_client.get_broker_capital()
-                        if broker_cap.get("available", 0.0) > 0:
+                        broker_avail = broker_cap.get("available", 0.0)
+                        if broker_avail > 0:
                             total_config_capital = sum(CAPITAL_PER_INDEX.get(idx, 100000.0) for idx in self.trading_indices)
-                            ratio_weight = CAPITAL_PER_INDEX.get(index, 100000.0) / total_config_capital
-                            index_capital = broker_cap["available"] * ratio_weight
+                            ratio_weight = CAPITAL_PER_INDEX.get(index, 100000.0) / (total_config_capital or 100000.0)
+                            trade_capital = min(broker_avail * ratio_weight, index_capital)
                     except Exception:
                         pass
+                log.warning(f"[RISK] [{self.username}] ⚠️ Live balance fetch returned 0 or failed. Falling back to trade capital Rs.{trade_capital:,.2f} for lot sizing.")
 
+        # Calculate lots dynamically using the option entry price
+        lots_calculated = False
+        lots = 1
+        try:
+            option_price = float(sig["entry"])
+            cost_per_lot = option_price * lot_size
+            if cost_per_lot > 0:
+                lots = math.floor(trade_capital / cost_per_lot)
+                if lots < 1:
+                    lots = 1
+                lots_calculated = True
+                log.info(f"[RISK] [DYNAMIC SIZING] [{self.username}] {index}: Trade Capital Limit=Rs.{trade_capital:,.2f} | Option Price=Rs.{option_price:.2f} | Lot Size={lot_size} | Cost/Lot=Rs.{cost_per_lot:,.2f} | Calculated Lots={lots}")
+        except Exception as e:
+            log.error(f"[RISK] [{self.username}] Error calculating dynamic lots: {e}")
+
+        if not lots_calculated:
+            # Fallback only if calculation failed due to exception
             ratio = index_capital / CAPITAL_PER_INDEX[index]
             if   ratio >= 1.00: lots = 5
             elif ratio >= 0.80: lots = 4
             elif ratio >= 0.60: lots = 3
             elif ratio >= 0.40: lots = 2
             else:               lots = 1
-
-        if self.live_trading and not lots_calculated:
-            log.warning(f"[RISK] [{self.username}] ⚠️ Live balance fetch returned 0 or failed. Falling back to configured capital Rs.{index_capital:,.2f} for lot sizing.")
-            ratio = index_capital / CAPITAL_PER_INDEX[index]
-            if   ratio >= 1.00: lots = 5
-            elif ratio >= 0.80: lots = 4
-            elif ratio >= 0.60: lots = 3
-            elif ratio >= 0.40: lots = 2
-            else:               lots = 1
-            lots_calculated = True
+            log.warning(f"[RISK] [{self.username}] Fallback to static lot sizing: {lots} lots.")
 
         contracts = lots * lot_size
 
@@ -2923,7 +3061,11 @@ class Book:
             predicted_win_prob=prob_pct_val,
             is_super_order=is_super,
             trailing_sl_enabled=self.trailing_sl_enabled,
-            is_live=self.live_trading
+            is_live=self.live_trading,
+            initial_sl=float(sig["sl"]),
+            breakeven_triggered=False,
+            original_lots=lots,
+            partial_booked=False
         )
         self.open[index][tid]  = p
         self.day_trades[index] += 1
@@ -3051,7 +3193,89 @@ class Book:
                 p.cur  = ltp
                 p.peak = max(p.peak, ltp)
 
-                if p.trailing_sl_enabled:
+                # Check for updates and save after modifications
+                modified = False
+
+                # 1. Theta Decay / Stagnant Trade check
+                if self.time_decay_exit_enabled:
+                    hold_mins = (_now() - p.entry_time).total_seconds() / 60.0
+                    if hold_mins >= self.time_decay_timeout_mins and ltp < p.entry:
+                        log.info(f"[RISK] ⏱️ Position {p.tid} held for {hold_mins:.1f} mins in loss. Triggering Theta Decay exit.")
+                        closed.append(self._close(p, round(max(0.5, ltp - LIMIT_OUT), 1), "THETA_DECAY"))
+                        continue
+
+                # Define the initial risk unit
+                risk_unit = p.entry - p.initial_sl
+                if risk_unit <= 0:
+                    risk_unit = p.entry * 0.1  # fallback to 10%
+
+                # 2. Partial Profit Booking
+                if self.partial_booking_enabled and p.original_lots > 1 and not p.partial_booked:
+                    if ltp >= p.entry + risk_unit * self.partial_booking_trigger_ratio:
+                        book_lots = max(1, int(p.original_lots * self.partial_booking_pct))
+                        book_lots = min(book_lots, p.lots - 1)  # leave at least 1 lot running
+                        if book_lots > 0:
+                            p.partial_booked = True
+                            p.lots -= book_lots
+                            p.contracts = p.lots * cfg.lot_size
+                            modified = True
+                            
+                            # Execute offset on broker if live trading
+                            if p.groww_order_id and p.groww_sec_id and self.live_trading:
+                                try:
+                                    book_contracts = book_lots * cfg.lot_size
+                                    place_groww_order(p.groww_sec_id, "SELL", book_contracts, index, client=self.groww_client)
+                                    log.info(f"[GROWW] [{self.username}] Placed partial SELL order of {book_lots} lots for {p.tid}")
+                                except Exception as e:
+                                    log.error(f"[GROWW] [{self.username}] ❌ Failed to place partial SELL order: {e}")
+                            
+                            # Move stop to breakeven
+                            p.sl = round(p.entry + self.breakeven_buffer_pts, 1)
+                            p.breakeven_triggered = True
+                            log.info(
+                                f"[PARTIAL_BOOK] 💰 Booked {book_lots} lots on {p.tid} at Rs.{ltp:.1f}. "
+                                f"Remaining lots: {p.lots} | Stop moved to Breakeven: Rs.{p.sl:.1f}"
+                            )
+
+                # 3. Breakeven & Progressive Trailing stop
+                gain_ratio = (ltp - p.entry) / risk_unit
+                
+                # Multi-stage trailing SL
+                if self.multi_stage_trail_enabled:
+                    # Stage 1: Reduce risk when 0.5R hit
+                    if 0.5 <= gain_ratio < 1.0:
+                        reduced_sl = round(p.entry - risk_unit * 0.3, 1)
+                        if reduced_sl > p.sl:
+                            p.sl = reduced_sl
+                            modified = True
+                            log.info(f"[TRAILING] 📈 {p.tid} ({self.username}) Stage 1: Risk reduced. New SL: Rs.{p.sl:.1f}")
+                    
+                    # Stage 2: Move to breakeven when 1.0R hit
+                    elif 1.0 <= gain_ratio < 1.5:
+                        if self.breakeven_enabled and not p.breakeven_triggered:
+                            p.sl = round(p.entry + self.breakeven_buffer_pts, 1)
+                            p.breakeven_triggered = True
+                            modified = True
+                            log.info(f"[TRAILING] 📈 {p.tid} ({self.username}) Stage 2: Stop moved to Breakeven. New SL: Rs.{p.sl:.1f}")
+                    
+                    # Stage 3: Lock in profits when 1.5R hit
+                    elif 1.5 <= gain_ratio < 1.8:
+                        locked_sl = round(p.entry + risk_unit * 0.5, 1)
+                        if locked_sl > p.sl:
+                            p.sl = locked_sl
+                            modified = True
+                            log.info(f"[TRAILING] 📈 {p.tid} ({self.username}) Stage 3: Profit locked (+0.5R). New SL: Rs.{p.sl:.1f}")
+                    
+                    # Stage 4: Ride-the-Trend trailing when target 1.8R hit
+                    elif gain_ratio >= 1.8:
+                        trail_sl = round(p.peak - risk_unit * 0.3, 1)
+                        if trail_sl > p.sl:
+                            p.sl = trail_sl
+                            modified = True
+                            log.info(f"[TRAILING] 🚀 {p.tid} ({self.username}) Stage 4: Ride-the-Trend Trail. Peak: Rs.{p.peak:.1f} | New SL: Rs.{p.sl:.1f}")
+
+                # Legacy trailing fallback
+                elif p.trailing_sl_enabled and not self.multi_stage_trail_enabled:
                     risk_dist = p.entry - p.sl
                     if risk_dist > 0:
                         trigger_level = p.entry + risk_dist * 0.3
@@ -3059,12 +3283,22 @@ class Book:
                             trail_sl = round(p.peak - risk_dist * 0.7, 1)
                             if trail_sl > p.sl:
                                 p.sl = trail_sl
+                                modified = True
                                 log.info(f"[TRAILING] 📈 {p.tid} ({self.username}) TSL active. Peak: Rs.{p.peak:.1f} | New SL: Rs.{p.sl:.1f}")
 
+                if modified:
+                    db_helper.save_position(self.user_id, p)
+
+                # Check exits
                 if ltp <= p.sl:
                     closed.append(self._close(p, round(max(0.5, p.sl), 1), "STOP_LOSS"))
                 elif ltp >= p.tp:
-                    closed.append(self._close(p, round(max(0.5, ltp - LIMIT_OUT), 1), "TARGET"))
+                    # If we are trailing beyond target to maximize profit, let the trail exit it
+                    if self.multi_stage_trail_enabled:
+                        # Continue letting it run, it will exit when ltp <= p.sl
+                        pass
+                    else:
+                        closed.append(self._close(p, round(max(0.5, ltp - LIMIT_OUT), 1), "TARGET"))
         return closed
 
     def exit_all(self, reason: str = "FORCE_EXIT"):
@@ -3187,6 +3421,7 @@ def run():
     _done = False
     
     global_last_scan_time = 0.0
+    signals: Dict[str, dict] = {}
     book_sync_times: Dict[int, float] = {}
     book_scan_times: Dict[int, float] = {}
 
@@ -3249,7 +3484,6 @@ def run():
 
         # Scan signals once globally for the active indices every 30 seconds
         now_time = time.time()
-        signals = {}
         if _in_session() and (now_time - global_last_scan_time >= 30):
             global_last_scan_time = now_time
             for idx in active_indices:
@@ -3257,6 +3491,8 @@ def run():
                     sig = _signal(idx)
                     if sig:
                         signals[idx] = sig
+                    else:
+                        signals.pop(idx, None)
                 except Exception as e:
                     log.error(f"[MAIN] Signal generation failed for {idx}: {e}")
 
@@ -5507,10 +5743,16 @@ function closeCredentialsModal() {
 async function submitCredentials() {
   const modal = document.getElementById('credentialsModal');
   const broker = modal.broker || 'GROWW';
-  const clientId = document.getElementById('modalClientId').value.trim();
-  const token = document.getElementById('modalAccessToken').value.trim();
+  let clientId = document.getElementById('modalClientId').value.trim();
+  let token = document.getElementById('modalAccessToken').value.trim();
   const errorMsg = document.getElementById('modalErrorMsg');
   const connectBtn = document.getElementById('modalConnectBtn');
+  
+  if (clientId.startsWith("eyJ") && !token) {
+    token = clientId;
+  } else if (token.startsWith("eyJ") && !clientId) {
+    clientId = token;
+  }
   
   if (!clientId) {
     errorMsg.style.color = 'var(--red)';

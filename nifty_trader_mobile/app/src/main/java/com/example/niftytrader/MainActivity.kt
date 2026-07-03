@@ -215,9 +215,9 @@ fun NiftyTraderApp() {
     }
 
     var rawBaseUrl by remember {
-        val saved = sharedPrefs.getString("raw_base_url", "https://gladly-crib-astound.ngrok-free.dev") ?: "https://gladly-crib-astound.ngrok-free.dev"
-        val initialUrl = if (saved.contains("overexert-purposely-illusion")) {
-            "https://gladly-crib-astound.ngrok-free.dev"
+        val saved = sharedPrefs.getString("raw_base_url", "http://10.0.2.2:5000") ?: "http://10.0.2.2:5000"
+        val initialUrl = if (saved.contains("gladly-crib-astound.ngrok-free.dev") || saved.contains("overexert-purposely-illusion")) {
+            "http://10.0.2.2:5000"
         } else {
             saved
         }

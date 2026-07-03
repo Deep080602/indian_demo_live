@@ -75,6 +75,16 @@ def init_db():
                 sl_on_premium_pct REAL DEFAULT 0.05,
                 tp_on_premium_pct REAL DEFAULT 0.15,
                 broker_login_date TEXT DEFAULT '',
+                breakeven_enabled INTEGER DEFAULT 1,
+                breakeven_trigger_ratio REAL DEFAULT 1.0,
+                breakeven_buffer_pts REAL DEFAULT 0.5,
+                multi_stage_trail_enabled INTEGER DEFAULT 1,
+                partial_booking_enabled INTEGER DEFAULT 0,
+                partial_booking_trigger_ratio REAL DEFAULT 1.0,
+                partial_booking_pct REAL DEFAULT 0.5,
+                dynamic_rrr_enabled INTEGER DEFAULT 1,
+                time_decay_exit_enabled INTEGER DEFAULT 1,
+                time_decay_timeout_mins INTEGER DEFAULT 45,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
         ''')
@@ -84,6 +94,22 @@ def init_db():
             c.execute("ALTER TABLE user_config ADD COLUMN broker_login_date TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass
+        for col, col_type, default_val in [
+            ("breakeven_enabled", "INTEGER", "1"),
+            ("breakeven_trigger_ratio", "REAL", "1.0"),
+            ("breakeven_buffer_pts", "REAL", "0.5"),
+            ("multi_stage_trail_enabled", "INTEGER", "1"),
+            ("partial_booking_enabled", "INTEGER", "0"),
+            ("partial_booking_trigger_ratio", "REAL", "1.0"),
+            ("partial_booking_pct", "REAL", "0.5"),
+            ("dynamic_rrr_enabled", "INTEGER", "1"),
+            ("time_decay_exit_enabled", "INTEGER", "1"),
+            ("time_decay_timeout_mins", "INTEGER", "45")
+        ]:
+            try:
+                c.execute(f"ALTER TABLE user_config ADD COLUMN {col} {col_type} DEFAULT {default_val}")
+            except sqlite3.OperationalError:
+                pass
         
         # Ensure default admin user exists
         c.execute("SELECT id FROM users WHERE username = 'admin'")
@@ -142,6 +168,10 @@ def init_db():
                 trailing_sl_enabled INTEGER DEFAULT 1,
                 is_open INTEGER DEFAULT 1,
                 is_live INTEGER DEFAULT 0,
+                initial_sl REAL DEFAULT 0.0,
+                breakeven_triggered INTEGER DEFAULT 0,
+                original_lots INTEGER DEFAULT 0,
+                partial_booked INTEGER DEFAULT 0,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
         ''')
@@ -163,6 +193,16 @@ def init_db():
             c.execute("ALTER TABLE positions ADD COLUMN groww_sec_id TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass
+        for col, col_type, default_val in [
+            ("initial_sl", "REAL", "0.0"),
+            ("breakeven_triggered", "INTEGER", "0"),
+            ("original_lots", "INTEGER", "0"),
+            ("partial_booked", "INTEGER", "0")
+        ]:
+            try:
+                c.execute(f"ALTER TABLE positions ADD COLUMN {col} {col_type} DEFAULT {default_val}")
+            except sqlite3.OperationalError:
+                pass
             
         # Copy data from legacy columns to new ones if they exist
         try:
@@ -325,14 +365,15 @@ def save_position(user_id, pos) -> bool:
                     exit_px, exit_time, exit_reason, pnl, groww_order_id, groww_sec_id, broker,
                     entry_charges, exit_charges, charges, brokerage, gst, stt, stamp_duty,
                     exchange_charges, sebi_fee, vix, atr_pct, guard_status, predicted_win_prob,
-                    is_super_order, trailing_sl_enabled, is_open, is_live
+                    is_super_order, trailing_sl_enabled, is_open, is_live,
+                    initial_sl, breakeven_triggered, original_lots, partial_booked
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?
                 )
             ''', (
                 pos.tid, user_id, client_id, pos.index, pos.direction, pos.strike, pos.opt, pos.expiry, pos.lots, pos.contracts,
@@ -342,8 +383,12 @@ def save_position(user_id, pos) -> bool:
                 pos.exit_reason, pos.pnl, pos.groww_order_id, pos.groww_sec_id, pos.broker,
                 pos.entry_charges, pos.exit_charges, pos.charges, pos.brokerage, pos.gst, pos.stt, pos.stamp_duty,
                 pos.exchange_charges, pos.sebi_fee, pos.vix, pos.atr_pct, pos.guard_status, pos.predicted_win_prob,
-                1 if pos.is_super_order else 0, 1 if pos.trailing_sl_enabled else 0, 1 if pos.is_open else 0,
-                is_live_pos
+                1 if getattr(pos, "is_super_order", False) else 0, 1 if getattr(pos, "trailing_sl_enabled", True) else 0, 1 if pos.is_open else 0,
+                is_live_pos,
+                getattr(pos, "initial_sl", 0.0),
+                1 if getattr(pos, "breakeven_triggered", False) else 0,
+                getattr(pos, "original_lots", pos.lots),
+                1 if getattr(pos, "partial_booked", False) else 0
             ))
             conn.commit()
             return True
@@ -395,6 +440,10 @@ def load_user_open_positions(user_id) -> dict:
                 d["trailing_sl_enabled"] = bool(d["trailing_sl_enabled"])
                 d["is_live"] = bool(d.get("is_live", 0))
                 d["client_id"] = d.get("client_id", "")
+                d["breakeven_triggered"] = bool(d.get("breakeven_triggered", 0))
+                d["partial_booked"] = bool(d.get("partial_booked", 0))
+                d["initial_sl"] = float(d.get("initial_sl", 0.0))
+                d["original_lots"] = int(d.get("original_lots", 0))
                 res[d["tid"]] = d
             return res
     except Exception as e:
@@ -707,6 +756,9 @@ def get_active_trading_user_ids() -> list:
     except Exception as e:
         log.error(f"[DB] Error getting active trading user IDs: {e}")
         return []
+
+
+
 
 
 

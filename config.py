@@ -54,6 +54,18 @@ class TradingConfig:
     daily_drawdown_limit_pct: float = 0.04   # Halt if day P&L < -4% of capital
     max_open_positions: int = 4              # Max 4 total (2 per index)
 
+    # ─── Pulse-Guard Risk Engine ──────────────────────────────────────────────
+    breakeven_enabled: bool = True
+    breakeven_trigger_ratio: float = 1.0     # Trigger breakeven once price reaches +1.0R
+    breakeven_buffer_pts: float = 0.5        # Buffer points added to entry to protect against transaction fees
+    multi_stage_trail_enabled: bool = True   # Enable multi-stage trailing stop levels
+    partial_booking_enabled: bool = False    # Book partial profits when target 1 hit (disabled by default)
+    partial_booking_trigger_ratio: float = 1.0 # book partial at +1.0R
+    partial_booking_pct: float = 0.5         # Book 50% of the position
+    dynamic_rrr_enabled: bool = True         # Volatility-adjusted dynamic target RRR (1.5x - 2.2x)
+    time_decay_exit_enabled: bool = True     # Close stale trade in loss to avoid theta decay
+    time_decay_timeout_mins: int = 45        # Timeout stagnant trades after 45 minutes
+
     # ─── Indicator Parameters ─────────────────────────────────────────────────
     ema_fast: int = 9
     ema_slow: int = 21

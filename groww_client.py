@@ -117,14 +117,24 @@ class GrowwClientWrapper:
         self.auth_error = ""
         client_id = self.groww_client_id or cfg.groww_client_id
         pin = self.groww_pin or cfg.groww_pin
+        
+        is_jwt = False
+        jwt_token = ""
+        if client_id and client_id.startswith("eyJ"):
+            is_jwt = True
+            jwt_token = client_id
+        elif pin and pin.startswith("eyJ"):
+            is_jwt = True
+            jwt_token = pin
+            
         try:
             # Check for official growwapi SDK
             import growwapi  # type: ignore
-            if client_id and pin:
+            if is_jwt or (client_id and pin):
                 try:
-                    if client_id.startswith("eyJ") and not pin:
+                    if is_jwt:
                         # Already a JWT access token! No need to call get_access_token
-                        token = client_id
+                        token = jwt_token
                     else:
                         # Exchange API Key & API Secret (or TOTP Secret) for access token
                         clean_pin = pin.replace(" ", "").upper()
@@ -170,10 +180,10 @@ class GrowwClientWrapper:
                 log.info("[GROWW] ⚠️ Groww Client initialized with empty credentials. Please connect via dashboard.")
         except ImportError:
             # Fallback to simulated/robust private client
-            if client_id and pin:
+            if is_jwt or (client_id and pin):
                 self.authenticated = True  # Simulated authentication
-                if client_id.startswith("eyJ") and not pin:
-                    token = client_id
+                if is_jwt:
+                    token = jwt_token
                 else:
                     clean_pin = pin.replace(" ", "").upper()
                     totp_code = None
@@ -285,7 +295,11 @@ class GrowwClientWrapper:
         # If no credentials saved, return 0
         client_id = self.groww_client_id or cfg.groww_client_id
         pin = self.groww_pin or cfg.groww_pin
-        if not client_id or not pin:
+        
+        is_jwt = (client_id and client_id.startswith("eyJ")) or (pin and pin.startswith("eyJ"))
+        if not client_id and not pin:
+            return {"available": 0.0, "base": 0.0}
+        if not is_jwt and (not client_id or not pin):
             return {"available": 0.0, "base": 0.0}
             
         # If not authenticated, return 0
